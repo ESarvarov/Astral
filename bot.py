@@ -1059,23 +1059,6 @@ def main_menu_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
     rows.append([KeyboardButton(BUTTON_BUY), KeyboardButton(BUTTON_SELL)])
     rows.append([KeyboardButton(BUTTON_SWAP)])
     rows.append([KeyboardButton(BUTTON_AML)])
-
-    rows.append([KeyboardButton(BUTTON_RATES), KeyboardButton(BUTTON_MY_ORDERS)])
-    rows.append([KeyboardButton(BUTTON_SUPPORT), KeyboardButton(BUTTON_MORE)])
-
-    if is_admin(telegram_id):
-        rows.append([KeyboardButton(BUTTON_ADMIN), KeyboardButton(BUTTON_ADMIN_SUMMARY)])
-        
-    rows.append([KeyboardButton(BUTTON_CANCEL)])
-
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
-
-def main_menu_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
-    rows: List[List[KeyboardButton]] = []
-    
-    rows.append([KeyboardButton(BUTTON_BUY), KeyboardButton(BUTTON_SELL)])
-    rows.append([KeyboardButton(BUTTON_SWAP)])
-    rows.append([KeyboardButton(BUTTON_AML)])
     rows.append([KeyboardButton(BUTTON_WALLET), KeyboardButton(BUTTON_CABINET)])
     rows.append([KeyboardButton(BUTTON_RATES), KeyboardButton(BUTTON_SUPPORT)])
     rows.append([KeyboardButton(BUTTON_NEWS), KeyboardButton(BUTTON_REVIEW)])
@@ -1430,9 +1413,6 @@ async def buy_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Сохраняем черновик
     context.user_data["buy_draft"] = {"step": "currency"}
-    
-    # Сбрасываем черновик
-    context.user_data["buy_draft"] = {}
     
     # Меняем нижнюю клавиатуру на "Назад" и "В меню"
     await update.message.reply_text(
@@ -2710,7 +2690,7 @@ async def cabinet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
     
     if data == "cab:orders":
-        # Получаем заявки напрямую из БД
+        # Получаем заявки напрямую из БД, не вызывая my_orders
         rows = get_user_orders(user_id, limit=10)
         if not rows:
             text = "Пока нет заявок."
@@ -2742,8 +2722,6 @@ async def cabinet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=main_menu_keyboard(user_id)
         )
         return CHOOSING
-        
-    return CHOOSING
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message:
