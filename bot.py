@@ -91,12 +91,15 @@ STATUS_CANCELLED = "Отменена"
 STATUS_RECEIPT_UPLOADED = "Чек получен, ожидает проверки"
 STATUS_PAYMENT_CONFIRMED = "Оплата подтверждена"
 STATUS_SENDING = "Отправка криптовалюты"
-ADMIN_ALLOWED_STATUSES = (STATUS_PENDING, STATUS_REVIEW, STATUS_DONE, STATUS_CANCELLED)
+ADMIN_ALLOWED_STATUSES = (STATUS_PENDING, STATUS_REVIEW, STATUS_DONE, STATUS_CANCELLED, STATUS_RECEIPT_UPLOADED, STATUS_PAYMENT_CONFIRMED, STATUS_SENDING)
 _STATUS_CB = {
     "P": STATUS_PENDING,
     "R": STATUS_REVIEW,
     "D": STATUS_DONE,
     "C": STATUS_CANCELLED,
+    "RU": STATUS_RECEIPT_UPLOADED,
+    "PC": STATUS_PAYMENT_CONFIRMED,
+    "S": STATUS_SENDING,
 }
 
 ALLOWED = (
@@ -1173,41 +1176,49 @@ async def buy_paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return BUY_RECEIPT_UPLOAD
 
 async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return CHOOSING
-        
-    # Если нажали "В меню" - сбрасываем и выходим
-    if update.message.text == BUTTON_BACK_TO_MENU:
-        context.user_data.pop("buy_draft", None)
-        await update.message.reply_text(
-            "Покупка отменена. Возвращаемся в главное меню.",
-            reply_markup=main_menu_keyboard(update.effective_user.id)
-        )
+    if not update.message or not update.effective_user:
         return CHOOSING
 
-    # Если нажали "Назад" - определяем, откуда мы пришли
+    # Если нажали "В меню" — сбрасываем черновик и выходим
+    if update.message.text == BUTTON_BACK_TO_MENU:
+        context.user_data.pop("buy_draft", None)
+        context.user_data.pop("buy_last_state", None)
+        return await show_menu(update, context, preface="Покупка отменена.\n")
+
     current_state = context.user_data.get("buy_last_state")
     draft = context.user_data.get("buy_draft", {})
 
+    # Если мы на первом шаге (выбор валюты) или состояние потеряно — возвращаем в меню
+    if current_state is None or current_state == BUY_CURRENCY:
+        # Исключение: если пришли с оплаты, а сеть была одна — возвращаем на выбор валюты
+        if current_state == BUY_CURRENCY and "currency" in draft:
+            context.user_data.pop("buy_last_state", None)
+            keyboard = [[InlineKeyboardButton(c, callback_data=f"buy_cur:{c}")] for c in ALLOWED_BUY_CRYPTO]
+            await update.message.reply_text(
+                "Какую криптовалюту хотите купить? Выберите вариант из списка.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return BUY_CURRENCY
+
+        context.user_data.pop("buy_draft", None)
+        context.user_data.pop("buy_last_state", None)
+        return await show_menu(update, context)
+
     if current_state == BUY_NETWORK:
-        # Возврат к выбору валюты
-        keyboard = []
-        for crypto in ALLOWED_BUY_CRYPTO:
-            keyboard.append([InlineKeyboardButton(crypto, callback_data=f"buy_cur:{crypto}")])
+        context.user_data.pop("buy_last_state", None)
+        keyboard = [[InlineKeyboardButton(c, callback_data=f"buy_cur:{c}")] for c in ALLOWED_BUY_CRYPTO]
         await update.message.reply_text(
             "Какую криптовалюту хотите купить? Выберите вариант из списка.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return BUY_CURRENCY
-        
+
     elif current_state == BUY_PAYMENT:
-        # Возврат к выбору сети (или к валюте, если сеть одна)
         crypto = draft.get("currency")
         networks = CRYPTO_NETWORKS.get(crypto, [])
         if len(networks) > 1:
-            keyboard = []
-            for net in networks:
-                keyboard.append([InlineKeyboardButton(net, callback_data=f"buy_net:{net}")])
+            context.user_data["buy_last_state"] = BUY_NETWORK
+            keyboard = [[InlineKeyboardButton(net, callback_data=f"buy_net:{net}")] for net in networks]
             await update.message.reply_text(
                 f"Вы выбрали: <b>{crypto}</b>\nВыберите сеть для получения:",
                 parse_mode="HTML",
@@ -1215,15 +1226,18 @@ async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             )
             return BUY_NETWORK
         else:
-            # Если сеть одна, возвращаем к выбору валюты
-            return await buy_back(update, context) # Рекурсивно вызываем сами себя
-            
+            # Без рекурсии: сразу отдаём экран выбора валюты
+            context.user_data.pop("buy_last_state", None)
+            keyboard = [[InlineKeyboardButton(c, callback_data=f"buy_cur:{c}")] for c in ALLOWED_BUY_CRYPTO]
+            await update.message.reply_text(
+                "Какую криптовалюту хотите купить? Выберите вариант из списка.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return BUY_CURRENCY
+
     elif current_state == BUY_AMOUNT_MODE:
-        # Возврат к выбору способа оплаты
-        draft = context.user_data.get("buy_draft", {})
-        keyboard = []
-        for method in PAYMENT_METHODS:
-            keyboard.append([InlineKeyboardButton(method, callback_data=f"buy_pay:{method}")])
+        context.user_data["buy_last_state"] = BUY_PAYMENT
+        keyboard = [[InlineKeyboardButton(method, callback_data=f"buy_pay:{method}")] for method in PAYMENT_METHODS]
         await update.message.reply_text(
             f"Вы покупаете: <b>{draft.get('currency')}</b>\n"
             f"Сеть получения: <b>{draft.get('network')}</b>\n"
@@ -1232,10 +1246,9 @@ async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return BUY_PAYMENT
-        
+
     elif current_state == BUY_AMOUNT_INPUT:
-        # Возврат к выбору режима (в рублях или в крипте)
-        draft = context.user_data.get("buy_draft", {})
+        context.user_data["buy_last_state"] = BUY_AMOUNT_MODE
         keyboard = [
             [InlineKeyboardButton("Сумму оплаты (в RUB)", callback_data="buy_mode:fiat")],
             [InlineKeyboardButton("Сумму криптовалюты", callback_data="buy_mode:crypto")]
@@ -1249,62 +1262,44 @@ async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return BUY_AMOUNT_MODE
-        
+
     elif current_state == BUY_RATE_CONFIRM:
-        # Возврат к вводу суммы (в том же режиме)
-        draft = context.user_data.get("buy_draft", {})
-        if draft.get("amount_mode") == "fiat":
-            prompt = "Введите сумму в рублях (RUB), которую хотите оплатить:"
-        else:
-            prompt = f"Введите количество {draft.get('currency')}, которое хотите получить:"
+        context.user_data["buy_last_state"] = BUY_AMOUNT_INPUT
+        prompt = (
+            "Введите сумму в рублях (RUB), которую хотите оплатить:"
+            if draft.get("amount_mode") == "fiat"
+            else f"Введите количество {draft.get('currency')}, которое хотите получить:"
+        )
         await update.message.reply_text(prompt)
         return BUY_AMOUNT_INPUT
-        
+
     elif current_state == BUY_WALLET_INPUT:
-        # Возврат к проверке расчёта
-        draft = context.user_data.get("buy_draft", {})
+        context.user_data["buy_last_state"] = BUY_RATE_CONFIRM
         keyboard = [
             [InlineKeyboardButton("Подтвердить расчёт", callback_data="buy_rate:confirm")],
             [InlineKeyboardButton("Изменить сумму", callback_data="buy_rate:change")]
         ]
         await update.message.reply_text(
-            f"Оплата: <b>{draft.get('pay_amount'):.2f} RUB</b>\n"
-            f"Получение: <b>{draft.get('receive_amount'):.6f} {draft.get('currency')}</b>\n"
-            f"Курс: <b>1 {draft.get('currency')} = {draft.get('rate'):.2f} RUB</b>\n\n"
+            f"Оплата: <b>{draft.get('pay_amount', 0):.2f} RUB</b>\n"
+            f"Получение: <b>{draft.get('receive_amount', 0):.6f} {draft.get('currency')}</b>\n"
+            f"Курс: <b>1 {draft.get('currency')} = {draft.get('rate', 0):.2f} RUB</b>\n\n"
             f"Подтвердите расчёт:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return BUY_RATE_CONFIRM
-        
+
     elif current_state == BUY_WALLET_CONFIRM:
-        # Возврат к вводу адреса
-        draft = context.user_data.get("buy_draft", {})
+        context.user_data["buy_last_state"] = BUY_WALLET_INPUT
         await update.message.reply_text(
             f"Укажите адрес кошелька для получения <b>{draft.get('currency')}</b>.\n"
             f"Сеть: <b>{draft.get('network')}</b>.",
             parse_mode="HTML"
         )
         return BUY_WALLET_INPUT
-        
-    elif current_state == BUY_FINAL_CONFIRM:
-        # Возврат к подтверждению адреса
-        draft = context.user_data.get("buy_draft", {})
-        keyboard = [
-            [InlineKeyboardButton("Подтвердить адрес", callback_data="buy_wallet:confirm")],
-            [InlineKeyboardButton("Изменить адрес", callback_data="buy_wallet:change")]
-        ]
-        await update.message.reply_text(
-            f"Адрес получения: <code>{draft.get('wallet')}</code>\n\n"
-            f"Подтвердите адрес:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return BUY_WALLET_CONFIRM
 
-    # Если состояние неизвестно, просто в меню
-    await update.message.reply_text("Возврат в меню.", reply_markup=main_menu_keyboard(update.effective_user.id))
-    return CHOOSING
+    return await show_menu(update, context)
+
 
 async def buy_upload_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -1638,6 +1633,7 @@ async def buy_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"Подтвердите расчёт, чтобы продолжить."
     )
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    context.user_data["buy_last_state"] = BUY_AMOUNT_INPUT
     return BUY_RATE_CONFIRM
 
 async def buy_rate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3906,6 +3902,7 @@ def main() -> None:
             CommandHandler("start", start),
             CommandHandler("exchange", exchange_command),
             CommandHandler("close_ticket", close_ticket_user_cmd),
+            CallbackQueryHandler(lambda u, c: show_menu(u, c), pattern=r"^buy_menu$")
         ],
         allow_reentry=True,
         per_user=True,
