@@ -4,6 +4,8 @@ import re
 import sqlite3
 import threading
 import time
+import asyncio
+from functools import partial
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -1366,7 +1368,7 @@ async def admin_purchase_status_callback(update: Update, context: ContextTypes.D
 async def buy_receipt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message:
         return BUY_RECEIPT_UPLOAD
-        
+
     order_id = context.user_data.get("buy_receipt_order_id")
     if not order_id:
         await update.message.reply_text("Ошибка: заявка не найдена. Начните заново.")
@@ -1385,22 +1387,45 @@ async def buy_receipt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Сохраняем file_id в БД и меняем статус
     update_order_receipt(order_id, file_id)
     update_order_status(order_id, STATUS_RECEIPT_UPLOADED)
-    
+
+    # Берём дополнительные поля (network, payment_method) для уведомления админов
+    network = None
+    payment_method = None
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT telegram_id, from_currency, to_currency, amount, rate, total, wallet_address, status, created_at, network, payment_method FROM orders WHERE id = ?", (order_id,))
+        orow = cur.fetchone()
+        if orow:
+            tg_id = orow[0]
+            from_c = orow[1]
+            to_c = orow[2]
+            amount = float(orow[3]) if orow[3] is not None else 0.0
+            rate = float(orow[4]) if orow[4] is not None else 0.0
+            total = float(orow[5]) if orow[5] is not None else 0.0
+            wallet = orow[6]
+            status = orow[7]
+            created_at = orow[8]
+            network = orow[9]
+            payment_method = orow[10]
+        else:
+            tg_id = None
+
     # Уведомляем админов
-    row = get_order_by_id(order_id)
-    if row:
-        tg_id, from_c, to_c, amount, rate, total, wallet, status, created_at = row[1:10]
+    if tg_id is not None:
         admins = _all_admin_ids()
         for aid in admins:
             try:
                 await context.bot.send_message(
                     chat_id=aid,
-                    text=f"🧾 Новый чек по заявке #{order_id}\n"
-                         f"User: {tg_id}\n"
-                         f"Покупка: {total:.6f} {to_c}\n"
-                         f"Оплата: {amount:.2f} {from_c}\n"
-                         f"Сеть: {row[10]}\n"
-                         f"Статус: {STATUS_RECEIPT_UPLOADED}",
+                    text=(
+                        f"🧾 Новый чек по заявке #{order_id}\n"
+                        f"User: {tg_id}\n"
+                        f"Покупка: {total:.6f} {to_c}\n"
+                        f"Оплата: {amount:.2f} {from_c}\n"
+                        f"Сеть: {network or '—'}\n"
+                        f"Способ оплаты: {payment_method or '—'}\n"
+                        f"Статус: {STATUS_RECEIPT_UPLOADED}"
+                    ),
                 )
                 # Отправляем сам чек
                 if update.message.photo:
@@ -1928,7 +1953,6 @@ async def show_menu(
     *,
     preface: str = "",
 ) -> int:
-    del context
     if not update.message or not update.effective_user:
         return CHOOSING
     if is_user_blocked(update.effective_user.id):
@@ -3687,6 +3711,10 @@ async def on_app_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
         repr(err),
         exc_info=err if isinstance(err, BaseException) else None,
     )
+
+async def run_db(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 
 async def admin_callback_status(
