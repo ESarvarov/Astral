@@ -1,4 +1,3 @@
-*проверка коммита*
 import logging
 import os
 import re
@@ -1921,9 +1920,8 @@ async def show_menu(
     uid = update.effective_user.id
     menu_text = f"{preface}👇 Выберите действие:"
     
-    inline_kb = get_context_inline_keyboard(uid)
-    inline_kb = get_context_inline_keyboard(user_id, context)
-    
+    inline_kb = get_context_inline_keyboard(uid, context)
+        
     if inline_kb:
         menu_msg = await update.message.reply_text(menu_text, reply_markup=inline_kb)
         await update.message.reply_text(
@@ -2691,7 +2689,6 @@ async def cabinet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
     
     if data == "cab:orders":
-        # Получаем заявки напрямую из БД, не вызывая my_orders
         rows = get_user_orders(user_id, limit=10)
         if not rows:
             text = "Пока нет заявок."
@@ -2701,7 +2698,6 @@ async def cabinet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 lines.append(format_order_line_short(row))
             text = "\n".join(lines)
         
-        # Отправляем новое сообщение (так как мы в callback)
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=text
