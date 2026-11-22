@@ -91,7 +91,15 @@ STATUS_CANCELLED = "Отменена"
 STATUS_RECEIPT_UPLOADED = "Чек получен, ожидает проверки"
 STATUS_PAYMENT_CONFIRMED = "Оплата подтверждена"
 STATUS_SENDING = "Отправка криптовалюты"
-ADMIN_ALLOWED_STATUSES = (STATUS_PENDING, STATUS_REVIEW, STATUS_DONE, STATUS_CANCELLED, STATUS_RECEIPT_UPLOADED, STATUS_PAYMENT_CONFIRMED, STATUS_SENDING)
+ADMIN_ALLOWED_STATUSES = (
+    STATUS_PENDING, 
+    STATUS_REVIEW, 
+    STATUS_DONE, 
+    STATUS_CANCELLED, 
+    STATUS_RECEIPT_UPLOADED, 
+    STATUS_PAYMENT_CONFIRMED, 
+    STATUS_SENDING
+)
 _STATUS_CB = {
     "P": STATUS_PENDING,
     "R": STATUS_REVIEW,
@@ -1181,7 +1189,6 @@ async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Если нажали "В меню" — сбрасываем черновик и выходим
     if update.message.text == BUTTON_BACK_TO_MENU:
-        context.user_data.pop("buy_draft", None)
         context.user_data.pop("buy_last_state", None)
         return await show_menu(update, context, preface="Покупка отменена.\n")
 
@@ -1421,6 +1428,7 @@ async def buy_receipt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         f"Способ оплаты: {payment_method or '—'}\n"
                         f"Статус: {STATUS_RECEIPT_UPLOADED}"
                     ),
+                    reply_markup=status_keyboard_purchase(order_id),
                 )
                 # Отправляем сам чек
                 if update.message.photo:
@@ -1949,29 +1957,51 @@ async def show_menu(
     *,
     preface: str = "",
 ) -> int:
-    if not update.message or not update.effective_user:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
         return CHOOSING
-    if is_user_blocked(update.effective_user.id):
-        await reply_blocked(update)
+
+    if is_user_blocked(user.id):
+        if update.message:
+            await reply_blocked(update)
+        else:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="Ваш аккаунт заблокирован. Для уточнений свяжитесь с поддержкой.",
+                reply_markup=blocked_user_keyboard(),
+            )
         return BLOCKED_USER
 
-    uid = update.effective_user.id
+    uid = user.id
     menu_text = f"{preface}👇 Выберите действие:"
-    
     inline_kb = get_context_inline_keyboard(uid, context)
-        
+
+    # Если вызов пришёл с inline-кнопки (callback_query), убираем старую inline-клавиатуру
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+
     if inline_kb:
-        menu_msg = await update.message.reply_text(menu_text, reply_markup=inline_kb)
-        await update.message.reply_text(
-            "Основное меню:",
-            reply_markup=main_menu_keyboard(uid)
+        menu_msg = await context.bot.send_message(
+            chat_id=chat.id,
+            text=menu_text,
+            reply_markup=inline_kb,
+        )
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Основное меню:",
+            reply_markup=main_menu_keyboard(uid),
         )
     else:
-        menu_msg = await update.message.reply_text(
-            menu_text,
-            reply_markup=main_menu_keyboard(uid)
+        menu_msg = await context.bot.send_message(
+            chat_id=chat.id,
+            text=menu_text,
+            reply_markup=main_menu_keyboard(uid),
         )
-    
+
     context.user_data["last_menu_msg_id"] = menu_msg.message_id
     return CHOOSING
 
@@ -2985,28 +3015,140 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query or not query.data:
         return None
     await query.answer()
-    
+
     data = query.data
     uid = update.effective_user.id if update.effective_user else 0
+    chat_id = update.effective_chat.id
 
     if data == "ctx:continue_buy":
         draft = context.user_data.get("buy_draft")
         if not draft:
-            await query.edit_message_text("Черновик не найден. Начните заново.")
-            return None
-        
-        step = draft.get("step")
-        if step == "currency":
-            return await buy_start(update, context)
-        elif step == "network":
-            # Возвращаем к выбору сети
-            ...
-        # и т.д.
-    
+            await query.edit_message_text("Черновик не найден. Начните заново из меню.")
+            return CHOOSING
+
+        # Включаем нижнюю клавиатуру навигации ("Назад" / "В меню")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="▶️ Продолжаем оформление покупки...",
+            reply_markup=buy_navigation_keyboard(),
+        )
+
+        # 1. Валюта ещё не выбрана
+        if "currency" not in draft:
+            context.user_data.pop("buy_last_state", None)
+            keyboard = [[InlineKeyboardButton(c, callback_data=f"buy_cur:{c}")] for c in ALLOWED_BUY_CRYPTO]
+            await query.edit_message_text(
+                "Какую криптовалюту хотите купить? Выберите вариант из списка.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return BUY_CURRENCY
+
+        crypto = draft["currency"]
+
+        # 2. Сеть ещё не выбрана
+        if "network" not in draft:
+            context.user_data["buy_last_state"] = BUY_CURRENCY
+            networks = CRYPTO_NETWORKS.get(crypto, [])
+            keyboard = [[InlineKeyboardButton(net, callback_data=f"buy_net:{net}")] for net in networks]
+            keyboard.append([InlineKeyboardButton("В меню", callback_data="buy_menu")])
+            await query.edit_message_text(
+                f"Вы выбрали: <b>{crypto}</b>\nВыберите сеть для получения:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return BUY_NETWORK
+
+        network = draft["network"]
+
+        # 3. Способ оплаты ещё не выбран
+        if "payment_method" not in draft:
+            context.user_data["buy_last_state"] = BUY_NETWORK
+            keyboard = [[InlineKeyboardButton(m, callback_data=f"buy_pay:{m}")] for m in PAYMENT_METHODS]
+            keyboard.append([InlineKeyboardButton("В меню", callback_data="buy_menu")])
+            await query.edit_message_text(
+                f"Вы покупаете: <b>{crypto}</b>\n"
+                f"Сеть получения: <b>{network}</b>\n"
+                f"Выберите способ оплаты.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return BUY_PAYMENT
+
+        method = draft["payment_method"]
+
+        # 4. Режим ввода суммы (RUB / крипта) не выбран
+        if "amount_mode" not in draft:
+            context.user_data["buy_last_state"] = BUY_PAYMENT
+            keyboard = [
+                [InlineKeyboardButton("Сумму оплаты (в RUB)", callback_data="buy_mode:fiat")],
+                [InlineKeyboardButton("Сумму криптовалюты", callback_data="buy_mode:crypto")],
+                [InlineKeyboardButton("В меню", callback_data="buy_menu")],
+            ]
+            await query.edit_message_text(
+                f"К покупке: <b>{crypto}</b>\n"
+                f"Сеть: <b>{network}</b>\n"
+                f"Способ оплаты: <b>{method}</b>\n\n"
+                f"Какую сумму хотите указать?",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return BUY_AMOUNT_MODE
+
+        # 5. Сумма ещё не введена
+        if "pay_amount" not in draft:
+            context.user_data["buy_last_state"] = BUY_AMOUNT_MODE
+            prompt = (
+                "Введите сумму в рублях (RUB), которую хотите оплатить:"
+                if draft["amount_mode"] == "fiat"
+                else f"Введите количество {crypto}, которое хотите получить:"
+            )
+            await query.edit_message_text(prompt)
+            return BUY_AMOUNT_INPUT
+
+        # 6. Адрес кошелька ещё не введён -> возвращаем на подтверждение расчёта
+        if "wallet" not in draft:
+            context.user_data["buy_last_state"] = BUY_AMOUNT_INPUT
+            keyboard = [
+                [InlineKeyboardButton("Подтвердить расчёт", callback_data="buy_rate:confirm")],
+                [InlineKeyboardButton("Изменить сумму", callback_data="buy_rate:change")],
+                [InlineKeyboardButton("В меню", callback_data="buy_menu")],
+            ]
+            await query.edit_message_text(
+                f"Проверьте условия покупки:\n\n"
+                f"Оплата: <b>{draft['pay_amount']:.2f} RUB</b>\n"
+                f"Способ оплаты: <b>{method}</b>\n"
+                f"Получение: <b>{draft['receive_amount']:.6f} {crypto}</b>\n"
+                f"Сеть получения: <b>{network}</b>\n"
+                f"Курс: <b>1 {crypto} = {draft['rate']:.2f} RUB</b>\n\n"
+                f"Подтвердите расчёт, чтобы продолжить.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return BUY_RATE_CONFIRM
+
+        # 7. Всё заполнено -> возвращаем на финальное подтверждение
+        context.user_data["buy_last_state"] = BUY_WALLET_CONFIRM
+        keyboard = [
+            [InlineKeyboardButton("Подтвердить и создать заявку", callback_data="buy_final:create")],
+            [InlineKeyboardButton("В меню", callback_data="buy_menu")],
+        ]
+        await query.edit_message_text(
+            f"Проверьте данные перед созданием заявки:\n\n"
+            f"Оплата: <b>{draft['pay_amount']:.2f} RUB</b>\n"
+            f"Способ оплаты: <b>{method}</b>\n"
+            f"Получение: <b>{draft['receive_amount']:.6f} {crypto}</b>\n"
+            f"Сеть получения: <b>{network}</b>\n"
+            f"Адрес получения: <code>{draft['wallet']}</code>\n\n"
+            f"Подтвердите условия и создание заявки.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return BUY_FINAL_CONFIRM
+
     if data == "ctx:continue_draft":
         await query.edit_message_text("▶️ Функция «Продолжить обмен» находится в разработке.")
         return None
-        
+
     if data == "ctx:active_orders":
         rows = get_user_orders(uid, limit=10)
         lines = ["🗂 Ваши активные заявки:"]
@@ -3017,91 +3159,79 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             lines.append("Нет активных заявок.")
         await query.edit_message_text("\n".join(lines))
         return None
-        
+
     if data.startswith("ctx:open_order:"):
         oid = int(data.split(":")[-1])
         await send_order_status_message(update, context, oid)
         return None
-        
+
     if data == "ctx:repeat":
         rows = get_user_orders(uid, limit=50)
         done_orders = [r for r in rows if r[7] == STATUS_DONE]
-        
+
         if not done_orders:
             await query.edit_message_text("У вас нет выполненных заявок для повторения.")
             return None
-            
-        buttons = []
-        for r in done_orders:
-            oid = r[0]
-            from_c = r[1]
-            to_c = r[2]
-            buttons.append([
-                InlineKeyboardButton(
-                    f"#{oid} | {from_c} → {to_c}",
-                    callback_data=f"ctx:repeat_order:{oid}"
-                )
-            ])
-        
+
+        buttons = [
+            [InlineKeyboardButton(f"#{r[0]} | {r[1]} → {r[2]}", callback_data=f"ctx:repeat_order:{r[0]}")]
+            for r in done_orders
+        ]
         await query.edit_message_text(
             "🔁 <b>Выберите выполненную заявку для повторения:</b>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
         return None
-        
+
     if data.startswith("ctx:repeat_order:"):
         oid = int(data.split(":")[-1])
         row = get_order_by_id(oid)
         if not row:
             await query.edit_message_text("Заявка не найдена.")
             return None
-            
+
         _oid, tg_id, from_c, to_c, amount, rate, total, wallet, status, created_at, updated_at = row
-        
+
         _clear_exchange_draft(context)
         context.user_data["exchange_mode"] = EXCHANGE_MODE_SWAP
         context.user_data["from_currency"] = from_c
         context.user_data["to_currency"] = to_c
         context.user_data["exchange_step"] = "amount"
-        
+
         await query.edit_message_text(
             f"🔁 <b>Повтор обмена</b>\n\n"
             f"Направление: {from_c} → {to_c}\n\n"
             f"Введите сумму в {from_c} (сколько отдаёте):",
             parse_mode="HTML",
-            reply_markup=None
+            reply_markup=None,
         )
-        
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             text="Введите сумму:",
-            reply_markup=exchange_step_keyboard()
+            reply_markup=exchange_step_keyboard(),
         )
         return AMOUNT
-        
+
     if data == "ctx:delete_completed":
         deleted = delete_completed_orders(uid)
-        
         await query.edit_message_text(
-            f"🗑 Удалено выполненных заявок: {deleted}\n\n"
-            "История обновлена."
+            f"🗑 Удалено выполненных заявок: {deleted}\n\nИстория обновлена."
         )
-        
-        inline_kb = get_context_inline_keyboard(uid)
+        inline_kb = get_context_inline_keyboard(uid, context)
         if inline_kb:
             await context.bot.send_message(
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 text="👇 Выберите действие:",
-                reply_markup=inline_kb
+                reply_markup=inline_kb,
             )
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             text="Основное меню:",
-            reply_markup=main_menu_keyboard(uid)
+            reply_markup=main_menu_keyboard(uid),
         )
         return None
-    
+
     return None
 
 
@@ -3773,6 +3903,7 @@ def main() -> None:
             A_MENU: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_router),
                 CallbackQueryHandler(admin_callback_status, pattern=r"^a:\d+:[PRDC]$"),
+                CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
                 CallbackQueryHandler(ticket_start_callback, pattern=r"^ticket:\d+$"),
             ],
             A_CONF_ORDER: [
@@ -3821,11 +3952,8 @@ def main() -> None:
                 CommandHandler("set_min_amount_withdraw_rub", set_setting),
                 CommandHandler("set_support_contact", set_setting),
                 CallbackQueryHandler(cabinet_callback, pattern=r"^cab:"),
+                CallbackQueryHandler(context_callback, pattern=r"^ctx:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons),
-            ],
-            A_MENU: [
-                # ... существующие хендлеры ...
-                CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
             ],
             BLOCKED_USER: [
                 CommandHandler("start", start),
@@ -3921,6 +4049,11 @@ def main() -> None:
     # --- Inline-кнопки контекстного меню (вне ConversationHandler) ---
     application.add_handler(
         CallbackQueryHandler(context_callback, pattern=r"^ctx:"),
+        group=1,
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
         group=1,
     )
 
