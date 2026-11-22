@@ -1,3 +1,4 @@
+*проверка коммита*
 import logging
 import os
 import re
