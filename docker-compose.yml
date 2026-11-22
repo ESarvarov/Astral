@@ -1,0 +1,33 @@
+services:
+  bot:
+    build: .
+    env_file:
+      - .env
+    command: python bot.py
+    restart: unless-stopped
+    volumes:
+      - exchange_data:/app/data
+      - ./assets:/app/assets
+    environment:
+      - DB_PATH=/app/data/exchange_bot.db
+      - MINI_APP_URL=${MINI_APP_URL}
+    depends_on:
+      - miniapp
+
+  miniapp:
+    build: .
+    env_file:
+      - .env
+    command: python miniapp_server.py
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - exchange_data:/app/data
+    environment:
+      - DB_PATH=/app/data/exchange_bot.db
+      - MINI_APP_HOST=0.0.0.0
+      - MINI_APP_PORT=8080
+
+volumes:
+  exchange_data:

@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Astral Exchange</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            /* Палитра Астрал */
+            --bg-main: #0f0c1b;          
+            --bg-card: #1a162b;          
+            --bg-input: #120f1f;         
+            --text-main: #ffffff;
+            --text-muted: #9a8fb8;       
+            --accent-primary: #9d4edd;   /* Мистический фиолетовый */
+            --accent-hover: #c77dff;     
+            --accent-secondary: #00f5d4; /* Неоновый бирюзовый */
+            --border-color: #2d2447;     
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+
+        body {
+            /* Градиент туманности */
+            background: radial-gradient(circle at top right, #1a103c, #0f0c1b 70%);
+            color: var(--text-main);
+            /* Оставляем место внизу под навигацию */
+            padding: 16px 16px 90px 16px; 
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            overscroll-behavior-y: none;
+        }
+
+        /* --- Вкладки --- */
+        .tab-content { display: none; flex-direction: column; gap: 16px; }
+        .tab-content.active { display: flex; }
+
+        /* --- Элементы дизайна --- */
+        .header { display: flex; align-items: center; gap: 12px; margin-bottom: 5px; }
+        .avatar { width: 44px; height: 44px; border-radius: 50%; border: 2px solid var(--accent-primary); box-shadow: 0 0 10px rgba(157, 78, 221, 0.5); object-fit: cover; }
+        
+        .card { background: var(--bg-card); border-radius: 16px; padding: 16px; border: 1px solid var(--border-color); position: relative; overflow: hidden; box-shadow: inset 0 0 20px rgba(0,0,0,0.2); }
+        
+        /* Декоративная звездочка на карточках */
+        .card::before {
+            content: '';
+            position: absolute;
+            top: -20px; right: -20px;
+            width: 60px; height: 60px;
+            background: radial-gradient(circle, rgba(157, 78, 221, 0.2) 0%, transparent 70%);
+            border-radius: 50%;
+        }
+
+
+
+        .input-group { background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 12px; padding: 12px; margin-bottom: 10px; transition: 0.3s; }
+        .input-group:focus-within { border-color: var(--accent-primary); box-shadow: 0 0 10px rgba(157, 78, 221, 0.2); }
+        
+        .currency-select { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .currency-select select { background: transparent; color: white; border: none; font-size: 15px; font-weight: 600; outline: none; cursor: pointer; appearance: none; }
+        .currency-select select option { background: var(--bg-card); }
+        
+        input[type="number"], input[type="text"] { background: transparent; border: none; color: white; font-size: 22px; font-weight: 700; width: 100%; outline: none; }
+        input::placeholder { color: var(--text-muted); font-weight: normal; }
+
+        .rate-row { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-muted); margin-top: 4px; padding: 0 4px; }
+        .rate-row strong { color: var(--accent-secondary); }
+
+        /* Кнопка */
+        .btn { 
+            background: linear-gradient(135deg, var(--accent-primary) 0%, #7b2cbf 100%); 
+            color: white; border: none; border-radius: 12px; padding: 16px; 
+            font-size: 16px; font-weight: 700; letter-spacing: 0.5px; cursor: pointer; 
+            transition: 0.3s; width: 100%; margin-top: 10px; 
+            box-shadow: 0 0 15px rgba(157, 78, 221, 0.4); 
+        }
+        .btn:active { transform: scale(0.98); background: var(--accent-hover); box-shadow: 0 0 25px rgba(157, 78, 221, 0.7); }
+        .btn:disabled { background: #333; color: #888; box-shadow: none; }
+
+        /* --- Карточки курсов --- */
+        .coin-card { display: flex; justify-content: space-between; align-items: center; background: var(--bg-card); border-radius: 12px; padding: 12px 16px; margin-bottom: 8px; border: 1px solid var(--border-color); }
+        .coin-info { display: flex; align-items: center; gap: 12px; }
+        .coin-icon { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; color: white; font-size: 14px; box-shadow: 0 0 8px currentColor; }
+        .coin-name { font-size: 15px; font-weight: 600; }
+        .coin-price { font-size: 13px; color: var(--accent-secondary); }
+
+        /* --- Пустые состояния --- */
+        .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px 20px; color: var(--text-muted); }
+        .empty-icon { width: 64px; height: 64px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; font-size: 24px; box-shadow: 0 0 15px rgba(157, 78, 221, 0.1); }
+
+        /* --- Нижняя навигация --- */
+        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: rgba(26, 22, 43, 0.95); backdrop-filter: blur(10px); border-top: 1px solid var(--border-color); display: flex; justify-content: space-around; padding: 10px 0 20px 0; z-index: 100; }
+        .nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; color: var(--text-muted); font-size: 11px; cursor: pointer; transition: 0.2s; }
+        .nav-item.active { color: var(--accent-primary); text-shadow: 0 0 10px rgba(157, 78, 221, 0.6); }
+        .nav-icon { font-size: 22px; }
+
+        /* Адаптивность */
+        @media (min-width: 600px) { 
+            body { max-width: 500px; margin: 0 auto; border-left: 1px solid var(--border-color); border-right: 1px solid var(--border-color); } 
+            .bottom-nav { max-width: 500px; margin: 0 auto; border-radius: 0; } 
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Вкладка 1: Обмен -->
+    <div id="tab-exchange" class="tab-content active">
+        
+        <!-- Шапка с приветствием -->
+        <div class="header">
+            <img src="https://ui-avatars.com/api/?name=Astral&background=9d4edd&color=fff&rounded=true" id="user-avatar" class="avatar" alt="User">
+            <div>
+                <div style="font-size: 12px; color: var(--text-muted);">Добрый день,</div>
+                <h1 style="font-size: 20px; margin-top: 2px; font-weight: 700; text-shadow: 0 0 10px rgba(157, 78, 221, 0.3);"><span id="user-name">Гость</span></h1>
+            </div>
+        </div>
+
+        <!-- Блок УСЛУГИ (горизонтально) -->
+        <div style="margin-top: 10px;">
+            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;">Услуги</div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <!-- Карточка "Обмен" -->
+                <div class="card" style="display: flex; flex-direction: column; align-items: flex-start; padding: 12px; cursor: pointer; border: 1px solid var(--accent-primary); box-shadow: 0 0 15px rgba(157, 78, 221, 0.2);" onclick="scrollToExchange()">
+                    <div style="background: rgba(157, 78, 221, 0.2); width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: var(--accent-secondary); margin-bottom: 8px;">
+                        ↕️
+                    </div>
+                    <div style="font-size: 15px; font-weight: 600; margin-bottom: 2px;">Обмен</div>
+                    <div style="font-size: 11px; color: var(--text-muted); line-height: 1.2;">Популярные монеты</div>
+                </div>
+
+                <!-- Карточка "Миксер" (Чистка) -->
+                <div class="card" style="display: flex; flex-direction: column; align-items: flex-start; padding: 12px; cursor: pointer; border: 1px solid var(--border-color);" onclick="openMixer()">
+                    <div style="background: rgba(0, 245, 212, 0.1); width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: var(--accent-secondary); margin-bottom: 8px;">
+                        🧹
+                    </div>
+                    <div style="font-size: 15px; font-weight: 600; margin-bottom: 2px;">Чистка</div>
+                    <div style="font-size: 11px; color: var(--text-muted); line-height: 1.2;">Анонимная очистка</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Карточка калькулятора обмена -->
+        <div class="card" id="exchange-calculator">
+            <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px;">Отдаете</div>
+            <div class="input-group">
+                <div class="currency-select">
+                    <select id="from-currency">
+                        <option value="BTC">Bitcoin (BTC)</option>
+                        <option value="ETH">Ethereum (ETH)</option>
+                        <option value="USDT">Tether (USDT)</option>
+                    </select>
+                </div>
+                <input type="number" id="amount-to-send" placeholder="0.00">
+            </div>
+
+            <div style="font-size: 13px; color: var(--text-muted); margin: 15px 0 10px 0; text-transform: uppercase; letter-spacing: 1px;">Получаете</div>
+            <div class="input-group">
+                <div class="currency-select">
+                    <select id="to-currency">
+                        <option value="RUB">Сбер RUB</option>
+                        <option value="USDT">Tether (USDT)</option>
+                    </select>
+                </div>
+                <input type="number" id="amount-to-receive" placeholder="0.00" readonly>
+            </div>
+
+            <div class="input-group" style="margin-top: 15px;">
+                <input type="text" id="wallet-address" placeholder="Реквизиты / Адрес кошелька" style="font-size: 15px;">
+            </div>
+
+            <div class="rate-row">
+                <span>Курс обмена:</span>
+                <strong id="current-rate">Загрузка...</strong>
+            </div>
+
+            <button class="btn" id="submit-btn">Совершить обмен</button>
+        </div>
+
+        <!-- Мини-курсы -->
+        <div style="margin-top: 10px;">
+            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;">Курсы Астрала</div>
+            <div class="coin-card">
+                <div class="coin-info"><div class="coin-icon" style="background:#f7931a; color: #f7931a;">B</div><div class="coin-name" style="color: white;">BTC</div></div>
+                <div class="coin-price" id="price-btc">- ₽</div>
+            </div>
+            <div class="coin-card">
+                <div class="coin-info"><div class="coin-icon" style="background:#627eea; color: #627eea;">Ξ</div><div class="coin-name" style="color: white;">ETH</div></div>
+                <div class="coin-price" id="price-eth">- ₽</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Вкладка 2: Заявки -->
+    <div id="tab-orders" class="tab-content">
+        <h1 style="text-align: center; margin-top: 20px; font-size: 20px;">Мои заявки</h1>
+        <div id="orders-list" style="display: flex; flex-direction: column; gap: 10px;"></div>
+        <div id="empty-orders" class="empty-state" style="display: none;">
+            <div class="empty-icon">📄</div>
+            <h2 style="color: white; font-size: 16px; margin-bottom: 8px;">Нет активных заявок</h2>
+            <p>Ваши заявки появятся здесь</p>
+        </div>
+    </div>
+
+    <!-- Вкладка 3: Профиль -->
+    <div id="tab-profile" class="tab-content">
+        <h1 style="text-align: center; margin-top: 20px; font-size: 20px;">Настройки</h1>
+        
+        <div class="card" style="display: flex; align-items: center; gap: 16px; margin-top: 20px;">
+            <img src="https://ui-avatars.com/api/?name=Astral&background=9d4edd&color=fff&rounded=true" style="width: 60px; height: 60px; border-radius: 50%; border: 2px solid var(--accent-primary); object-fit: cover;" alt="User">
+            <div>
+                <div style="font-size: 18px; font-weight: 600;" id="profile-name">Пользователь</div>
+                <div style="font-size: 14px; color: var(--text-muted);" id="profile-username">@username</div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-top: 16px;">
+            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px;">Тема</div>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn" style="background: linear-gradient(135deg, var(--accent-primary) 0%, #7b2cbf 100%); margin-top: 0; padding: 12px; font-size: 14px; box-shadow: none;">🌙 Тёмная</button>
+                <button class="btn" style="background: var(--bg-input); border: 1px solid var(--border-color); margin-top: 0; padding: 12px; font-size: 14px; box-shadow: none; color: var(--text-muted);">☀️ Светлая</button>
+            </div>
+        </div>
+
+        <div class="card" style="margin-top: 16px;">
+            <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px;">Информация</div>
+            <div style="display: flex; align-items: center; gap: 10px; color: var(--text-main);">
+                <span>🎧</span> <span>Техническая поддержка</span>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 30px; color: var(--text-muted); font-size: 12px;">
+            Astral Exchange<br>версия 1.0.0
+        </div>
+    </div>
+
+    <!-- Навигация -->
+    <div class="bottom-nav">
+        <div class="nav-item active" onclick="switchTab('exchange', this)">
+            <span class="nav-icon">↕️</span>
+            <span>Обмен</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('orders', this)">
+            <span class="nav-icon">📑</span>
+            <span>Заявки</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('profile', this)">
+            <span class="nav-icon">👤</span>
+            <span>Профиль</span>
+        </div>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand(); 
+        tg.setHeaderColor('#0f0c1b');
+        tg.setBackgroundColor('#0f0c1b');
+
+        // Данные пользователя и Аватарка
+        const user = tg.initDataUnsafe?.user;
+        if (user) {
+            document.getElementById('user-name').innerText = user.first_name;
+            document.getElementById('profile-name').innerText = user.first_name + (user.last_name ? ' ' + user.last_name : '');
+            document.getElementById('profile-username').innerText = user.username ? '@' + user.username : '';
+            
+            // Сначала ставим заглушку (чтобы не было пустого места)
+            const fallbackUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.first_name)}&background=9d4edd&color=fff&rounded=true&bold=true`;
+            document.getElementById('user-avatar').src = fallbackUrl;
+            
+            // Пытаемся загрузить реальную аватарку с сервера
+            fetch(`/api/avatar?telegram_id=${user.id}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.url) {
+                        document.getElementById('user-avatar').src = data.url;
+                        // Меняем аватарку и в профиле
+                        const profileImg = document.querySelector('#tab-profile img');
+                        if (profileImg) profileImg.src = data.url;
+                    }
+                })
+                .catch(err => console.log("Не удалось загрузить реальную аватарку:", err));
+        }
+
+        const userId = user?.id || 123456789; 
+
+        // Переключение вкладок
+        function switchTab(tabId, el) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            document.getElementById('tab-' + tabId).classList.add('active');
+            el.classList.add('active');
+            if (tabId === 'orders') loadOrders();
+        }
+
+        // Прокрутка к калькулятору
+        function scrollToExchange() {
+            const element = document.getElementById('exchange-calculator');
+            if (element) {
+                element.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        // Заглушка для Миксера
+        function openMixer() {
+            tg.showAlert('Функция «Миксер» находится в разработке. Следите за обновлениями!');
+        }
+
+        // Логика обмена
+        let currentRates = {};
+        const fromSelect = document.getElementById('from-currency');
+        const toSelect = document.getElementById('to-currency');
+        const amountInput = document.getElementById('amount-to-send');
+        const receiveInput = document.getElementById('amount-to-receive');
+        const rateText = document.getElementById('current-rate');
+        const submitBtn = document.getElementById('submit-btn');
+
+        async function loadRates() {
+            try {
+                const response = await fetch('/api/rates');
+                const data = await response.json();
+                currentRates = data.rates;
+                
+                if(currentRates['BTC'] && currentRates['RUB']) {
+                    document.getElementById('price-btc').innerText = (currentRates['BTC'] / currentRates['RUB']).toFixed(0) + ' ₽';
+                }
+                if(currentRates['ETH'] && currentRates['RUB']) {
+                    document.getElementById('price-eth').innerText = (currentRates['ETH'] / currentRates['RUB']).toFixed(0) + ' ₽';
+                }
+                calculate();
+            } catch (e) {
+                rateText.innerText = "Ошибка сети";
+            }
+        }
+
+        function calculate() {
+            const amount = parseFloat(amountInput.value) || 0;
+            const from = fromSelect.value;
+            const to = toSelect.value;
+
+            if (currentRates[from] && currentRates[to] && amount > 0) {
+                const rate = currentRates[from] / currentRates[to];
+                receiveInput.value = (amount * rate).toFixed(6);
+                rateText.innerText = `1 ${from} = ${rate.toFixed(4)} ${to}`;
+            } else {
+                receiveInput.value = '';
+                rateText.innerText = "Введите сумму";
+            }
+        }
+
+        amountInput.addEventListener('input', calculate);
+        fromSelect.addEventListener('change', calculate);
+        toSelect.addEventListener('change', calculate);
+
+        submitBtn.addEventListener('click', async () => {
+            const amount = parseFloat(amountInput.value);
+            const wallet = document.getElementById('wallet-address').value.trim();
+
+            if (!amount || amount <= 0) return tg.showAlert('Введите сумму');
+            if (wallet.length < 5) return tg.showAlert('Введите реквизиты (мин. 5 символов)');
+
+            submitBtn.disabled = true;
+            submitBtn.innerText = 'Отправка...';
+
+            try {
+                const response = await fetch('/api/order', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        telegram_id: userId,
+                        from_currency: fromSelect.value,
+                        to_currency: toSelect.value,
+                        amount: amount,
+                        wallet_address: wallet
+                    })
+                });
+
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.detail || 'Ошибка');
+
+                tg.showAlert(`Заявка #${result.order_id} успешно создана!`);
+                
+                amountInput.value = '';
+                receiveInput.value = '';
+                document.getElementById('wallet-address').value = '';
+                calculate();
+            } catch (error) {
+                tg.showAlert(error.message);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerText = 'Совершить обмен';
+            }
+        });
+
+        // Логика загрузки заявок
+        async function loadOrders() {
+            const ordersList = document.getElementById('orders-list');
+            const emptyState = document.getElementById('empty-orders');
+            
+            try {
+                const response = await fetch(`/api/my_orders?telegram_id=${userId}`);
+                const data = await response.json();
+                
+                ordersList.innerHTML = ''; 
+
+                if (data.orders && data.orders.length > 0) {
+                    emptyState.style.display = 'none';
+                    data.orders.forEach(order => {
+                        let statusColor = 'var(--text-muted)';
+                        if (order.status === 'Выполнена') statusColor = 'var(--accent-secondary)';
+                        if (order.status === 'Отменена') statusColor = '#ff6b6b';
+
+                        const orderEl = document.createElement('div');
+                        orderEl.className = 'card';
+                        orderEl.style.marginBottom = '0';
+                        orderEl.innerHTML = `
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                <strong style="color: white;">Заявка #${order.id}</strong>
+                                <span style="color: ${statusColor}; font-size: 13px; font-weight: 600;">${order.status}</span>
+                            </div>
+                            <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 4px;">
+                                Отдаю: <span style="color: white;">${order.amount} ${order.from_currency}</span>
+                            </div>
+                            <div style="font-size: 13px; color: var(--text-muted);">
+                                Получаю: <span style="color: white;">${order.total.toFixed(2)} ${order.to_currency}</span>
+                            </div>
+                            <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px; text-align: right;">
+                                ${new Date(order.created_at).toLocaleString('ru-RU')}
+                            </div>
+                        `;
+                        ordersList.appendChild(orderEl);
+                    });
+                } else {
+                    emptyState.style.display = 'flex';
+                }
+            } catch (error) {
+                console.error("Ошибка загрузки заявок:", error);
+            }
+        }
+
+        loadRates();
+    </script>
+</body>
+</html>
