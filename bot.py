@@ -1658,19 +1658,24 @@ async def admin_sell_status_callback(
 
     # 3. Ветка QR — Экран 13Б: запрос QR-кода у клиента
     if action == "QR_ASK":
+        # Привязываем клиента к текущему админу, чтобы фото/сообщения ушли напрямую ему
+        create_ticket(user_id=tg_id, admin_id=uid, name=f"Заявка #{oid}")
+
         await query.edit_message_text(
-            f"Инструкция по формированию QR-кода отправлена клиенту по заявке #{oid}.",
+            f"Инструкция по формированию QR-кода отправлена клиенту по заявке #{oid}.\n"
+            f"Чат с клиентом открыт — ожидайте фото QR-кода.",
             reply_markup=status_keyboard_sell(oid, is_qr=True),
         )
         try:
             await context.bot.send_message(
                 chat_id=tg_id,
                 text=(
-                    f"Сформируйте QR-код у банкомата и отправьте его администратору в согласованный чат.\n"
+                    f"Сформируйте QR-код у банкомата и отправьте его фото или скриншот прямо в этот чат.\n"
                     f"Администратор обработает QR-код для снятия средств по заявке <b>#{oid}</b>. "
                     f"К выдаче: <b>{total:.2f} {to_c}</b>."
                 ),
                 parse_mode="HTML",
+                reply_markup=support_step_keyboard(),
             )
         except TelegramError:
             pass
