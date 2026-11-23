@@ -1485,6 +1485,185 @@ async def admin_purchase_status_callback(update: Update, context: ContextTypes.D
             
     return A_MENU
 
+async def admin_sell_status_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> Optional[int]:
+    query = update.callback_query
+    if not query or not query.data:
+        return None
+    await query.answer()
+
+    uid = update.effective_user.id if update.effective_user else 0
+    if not is_admin(uid):
+        return None
+
+    m = re.match(r"^sa:(\d+):([A-Z_]+)$", query.data)
+    if not m:
+        return None
+
+    oid = int(m.group(1))
+    action = m.group(2)
+
+    row = get_order_by_id(oid)
+    if not row:
+        await query.edit_message_text("Заявка не найдена.")
+        return A_MENU
+
+    # row: (0:id, 1:telegram_id, 2:from_currency, 3:to_currency, 4:amount, 5:rate, 6:total, 7:wallet_address, 8:status, ...)
+    tg_id = row[1]
+    from_c = row[2]
+    to_c = row[3]
+    amount = float(row[4])
+    total = float(row[6])
+    wallet = row[7]
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT payment_method FROM orders WHERE id = ?", (oid,))
+        pm_row = cur.fetchone()
+    method = pm_row[0] if pm_row else ""
+    is_qr = (method == SELL_METHOD_QR)
+
+    # 1. Криптовалюта получена и проверена (Экран 11 или Экран 11Б)
+    if action == "CRYPTO_OK":
+        if is_qr:
+            new_status = STATUS_SELL_WAIT_ADMIN_QR
+            update_order_status(oid, new_status)
+            client_text = (
+                f"Криптовалюта по заявке <b>#{oid}</b> поступила и проверена.\n"
+                f"К выдаче: <b>{total:.2f} {to_c}</b>.\n"
+                f"Администратор свяжется с вами, чтобы согласовать время получения наличных через банкомат по QR-коду. "
+                f"Следите за сообщениями в этом чате."
+            )
+        else:
+            new_status = STATUS_SELL_PAYOUT_PROCESS
+            update_order_status(oid, new_status)
+            masked = mask_card_details(wallet)
+            client_text = (
+                f"Криптовалюта по заявке <b>#{oid}</b> поступила и проверена.\n"
+                f"Готовим выплату: <b>{total:.2f} {to_c}</b>. Карта: <code>{masked}</code>.\n"
+                f"Статус: <b>{new_status}</b>. Мы сообщим, когда выплата будет выполнена."
+            )
+
+        await query.edit_message_text(
+            f"Заявка #{oid} переведена в статус: <b>{new_status}</b>",
+            parse_mode="HTML",
+            reply_markup=status_keyboard_sell(oid, is_qr=is_qr),
+        )
+        try:
+            await context.bot.send_message(chat_id=tg_id, text=client_text, parse_mode="HTML")
+        except TelegramError:
+            pass
+        return A_MENU
+
+    # 2. Ветка QR — Экран 12Б: запрос даты и времени у админа
+    if action == "QR_TIME":
+        context.user_data["admin_qr_order_id"] = oid
+        await query.edit_message_text(
+            f"Введите согласованную дату и время получения наличных по заявке <b>#{oid}</b> "
+            f"(например: <code>25.11.2026 в 15:30</code>):",
+            parse_mode="HTML",
+        )
+        return A_SELL_QR_TIME
+
+    # 3. Ветка QR — Экран 13Б: запрос QR-кода у клиента
+    if action == "QR_ASK":
+        await query.edit_message_text(
+            f"Инструкция по формированию QR-кода отправлена клиенту по заявке #{oid}.",
+            reply_markup=status_keyboard_sell(oid, is_qr=True),
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=tg_id,
+                text=(
+                    f"Сформируйте QR-код у банкомата и отправьте его администратору в согласованный чат.\n"
+                    f"Администратор обработает QR-код для снятия средств по заявке <b>#{oid}</b>. "
+                    f"К выдаче: <b>{total:.2f} {to_c}</b>."
+                ),
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+        return A_MENU
+
+    # 4. Завершение выплаты (Экран 12 для карты или Экран 14Б для QR)
+    if action == "DONE":
+        update_order_status(oid, STATUS_DONE)
+        if is_qr:
+            client_text = (
+                f"Заявка <b>#{oid}</b> выполнена.\n"
+                f"Наличные выданы: <b>{total:.2f} {to_c}</b>.\n"
+                f"Продано: <b>{amount:.6f} {from_c}</b>."
+            )
+        else:
+            masked = mask_card_details(wallet)
+            client_text = (
+                f"Заявка <b>#{oid}</b> выполнена.\n"
+                f"На карту <code>{masked}</code> отправлено <b>{total:.2f} {to_c}</b>.\n"
+                f"Продано: <b>{amount:.6f} {from_c}</b>."
+            )
+
+        await query.edit_message_text(f"✅ Заявка #{oid} завершена ({STATUS_DONE}).")
+        try:
+            await context.bot.send_message(chat_id=tg_id, text=client_text, parse_mode="HTML")
+        except TelegramError:
+            pass
+        return A_MENU
+
+    # 5. Отмена заявки
+    if action == "CANCEL":
+        update_order_status(oid, STATUS_CANCELLED)
+        await query.edit_message_text(f"❌ Заявка #{oid} отменена ({STATUS_CANCELLED}).")
+        try:
+            await context.bot.send_message(
+                chat_id=tg_id,
+                text=f"Ваша заявка на продажу <b>#{oid}</b> была отменена администратором.",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+        return A_MENU
+
+    return A_MENU
+
+
+async def admin_sell_qr_time_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if not update.message or not update.message.text or not update.effective_user:
+        return A_SELL_QR_TIME
+
+    routed = await admin_route_if_panel_button(update, context)
+    if routed is not None:
+        return routed
+
+    oid = context.user_data.pop("admin_qr_order_id", None)
+    if not oid:
+        await update.message.reply_text("Заявка не найдена.", reply_markup=admin_menu_keyboard())
+        return A_MENU
+
+    agreed_time = update.message.text.strip()
+    row = get_order_by_id(oid)
+    if row:
+        tg_id = row[1]
+        try:
+            await context.bot.send_message(
+                chat_id=tg_id,
+                text=(
+                    f"Получение наличных по заявке <b>#{oid}</b> согласовано на <b>{agreed_time}</b>.\n"
+                    f"QR-код будет сформирован у банкомата. Следуйте дальнейшим инструкциям администратора."
+                ),
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+
+    await update.message.reply_text(
+        f"Время ({agreed_time}) по заявке #{oid} отправлено клиенту.",
+        reply_markup=status_keyboard_sell(oid, is_qr=True),
+    )
+    return A_MENU
+
 async def buy_receipt_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message:
         return BUY_RECEIPT_UPLOAD
