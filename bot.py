@@ -3428,6 +3428,19 @@ async def handle_user_media_in_choosing(update: Update, context: ContextTypes.DE
     await update.message.reply_text("Выберите действие из меню ниже.")
     return CHOOSING
 
+async def user_in_support_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.effective_user:
+        return USER_IN_SUPPORT
+
+    sent = await notify_admins_user_media(context, update)
+    if sent:
+        await update.message.reply_text("QR-код / файл передан администратору.")
+    else:
+        await update.message.reply_text(
+            "Не удалось передать файл: обращение закрыто или оператор недоступен."
+        )
+    return USER_IN_SUPPORT
+
 async def user_in_support_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message or not update.message.text or not update.effective_user:
         return USER_IN_SUPPORT
@@ -5242,8 +5255,8 @@ def main() -> None:
                 CommandHandler("set_support_contact", set_setting),
                 CallbackQueryHandler(cabinet_callback, pattern=r"^cab:"),
                 CallbackQueryHandler(context_callback, pattern=r"^ctx:"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, handle_user_media_in_choosing),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons),
             ],
             BLOCKED_USER: [
                 CommandHandler("start", start),
@@ -5266,8 +5279,8 @@ def main() -> None:
             WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_order)],
             USER_IN_SUPPORT: [
                 CommandHandler("close_ticket", close_ticket_user_cmd),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, user_in_support_text),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, user_in_support_media),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, user_in_support_text),
             ],
             BUY_CURRENCY: [
                 CallbackQueryHandler(buy_currency_selected, pattern=r"^buy_cur:"),
