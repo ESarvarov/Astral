@@ -5110,11 +5110,13 @@ def main() -> None:
         entry_points=[
             CommandHandler("admin", admin_entry),
             CallbackQueryHandler(ticket_start_callback, pattern=r"^ticket:\d+$"),
+            CallbackQueryHandler(admin_sell_status_callback, pattern=r"^sa:\d+:QR_TIME$"),
         ],
         states={
             A_MENU: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_router),
                 CallbackQueryHandler(admin_callback_status, pattern=r"^a:\d+:[PRDC]$"),
+                CallbackQueryHandler(admin_sell_status_callback, pattern=r"^sa:\d+:QR_TIME$"),
                 CallbackQueryHandler(ticket_start_callback, pattern=r"^ticket:\d+$"),
             ],
             A_CONF_ORDER: [
@@ -5308,14 +5310,17 @@ def main() -> None:
         group=1,
     )
 
-        
     application.add_handler(
         CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
         group=1,
     )
 
+    # Все кнопки продажи, кроме QR_TIME (она обрабатывается в admin_conv для перехода в A_SELL_QR_TIME)
     application.add_handler(
-        CallbackQueryHandler(admin_sell_status_callback, pattern=r"^sa:\d+:[A-Z_]+$"),
+        CallbackQueryHandler(
+            admin_sell_status_callback,
+            pattern=r"^sa:\d+:(CRYPTO_OK|QR_ASK|DONE|CANCEL)$",
+        ),
         group=1,
     )
 
