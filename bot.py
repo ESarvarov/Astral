@@ -139,6 +139,16 @@ ADMIN_ALLOWED_STATUSES = (
     STATUS_SELL_WAIT_ADMIN_QR,
     STATUS_EXPIRED,
 )
+ACTIVE_ORDER_STATUSES = (
+    STATUS_PENDING,
+    STATUS_REVIEW,
+    STATUS_RECEIPT_UPLOADED,
+    STATUS_PAYMENT_CONFIRMED,
+    STATUS_SENDING,
+    STATUS_SELL_CHECKING,
+    STATUS_SELL_PAYOUT_PROCESS,
+    STATUS_SELL_WAIT_ADMIN_QR,
+)
 _STATUS_CB = {
     "P": STATUS_PENDING,
     "R": STATUS_REVIEW,
@@ -257,10 +267,10 @@ def get_order_remaining_minutes(order_id: int) -> Optional[int]:
             (order_id,),
         )
         row = cur.fetchone()
-    if not row or row != "sell" or row != STATUS_PENDING or not row:
+    if not row or row[0] != "sell" or row[1] != STATUS_PENDING or not row[2]:
         return None
     try:
-        exp_dt = datetime.fromisoformat(row)
+        exp_dt = datetime.fromisoformat(row[2])
         delta = exp_dt - datetime.now(timezone.utc)
         mins = int(delta.total_seconds() // 60)
         return max(0, mins)
@@ -1217,7 +1227,7 @@ def get_user_menu_state(telegram_id: int) -> dict:
     active_count = 0
     completed_count = 0
     for row in rows:
-        status = row
+        status = row[7]
         if status in ACTIVE_ORDER_STATUSES:
             active_count += 1
         elif status == STATUS_DONE:
@@ -1234,6 +1244,13 @@ def get_context_inline_keyboard(
 ) -> Optional[InlineKeyboardMarkup]:
     state = get_user_menu_state(telegram_id)
     buttons = []
+
+    for o in orders:
+    if o[7] in ACTIVE_ORDER_STATUSES:
+        buttons.append(
+            [InlineKeyboardButton(f"{BUTTON_OPEN_ORDER} #{o[0]}", callback_data=f"ctx:open_order:{o[0]}")]
+        )
+        break
 
     if context and context.user_data.get("buy_draft"):
         buttons.append(
@@ -3755,7 +3772,7 @@ async def send_order_status_message(
 
     if not row:
         msg = "Заявка не найдена."
-    elif uid is not None and row != uid and not is_admin(uid):
+    elif uid is not None and row[1] != uid and not is_admin(uid):
         msg = "Эта заявка принадлежит другому пользователю."
     else:
         _oid, tg_id, from_c, to_c, amount, rate, total, wallet, status, created_at, updated_at = row
@@ -3826,14 +3843,15 @@ async def my_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def my_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message or not update.effective_user:
         return CHOOSING
-    
-    stats = get_admin_stats() # Используем существующую статистику
-    total_orders = stats.get("total_orders", 0)
-    
+
+    user_id = update.effective_user.id
+    user_orders = get_user_orders(user_id, limit=100)
+    completed_orders = len([r for r in user_orders if r[7] == STATUS_DONE])
+
     text = (
         f"👤 <b>Личный кабинет</b>\n\n"
         f"📊 Статус: <b>Новичок</b>\n"
-        f"✅ Успешных сделок: <b>{total_orders}</b>\n"
+        f"✅ Успешных сделок: <b>{completed_orders}</b>\n"
         f"👥 Приглашено друзей: <b>0</b>\n"
         f"💰 Баланс реферальных: <b>0 RUB</b>\n\n"
         f"🔗 Ссылка для приглашения: (будет сгенерирована)\n"
@@ -4291,12 +4309,12 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         rows = get_user_orders(uid, limit=20)
         lines = ["🗂 Ваши активные заявки:"]
         for r in rows:
-            if r in ACTIVE_ORDER_STATUSES:
-                rem = get_order_remaining_minutes(r)
+            if r[7] in ACTIVE_ORDER_STATUSES:
+                rem = get_order_remaining_minutes(r[0])
                 timer_str = f" (осталось ~{rem} мин.)" if rem is not None else ""
                 lines.append(
-                    f"\n#{r} | {r}{timer_str}\n"
-                    f"{r} {r} → {r:.6f} {r}"
+                    f"\n#{r[0]} | {r[7]}{timer_str}\n"
+                    f"{r[3]} {r[1]} → {r[5]:.6f} {r[2]}"
                 )
         if len(lines) == 1:
             lines.append("Нет активных заявок.")
@@ -5097,8 +5115,6 @@ def main() -> None:
             A_MENU: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_router),
                 CallbackQueryHandler(admin_callback_status, pattern=r"^a:\d+:[PRDC]$"),
-                CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
-                CallbackQueryHandler(admin_sell_status_callback, pattern=r"^sa:\d+:[A-Z_]+$"),
                 CallbackQueryHandler(ticket_start_callback, pattern=r"^ticket:\d+$"),
             ],
             A_CONF_ORDER: [
