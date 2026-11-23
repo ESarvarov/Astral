@@ -4943,6 +4943,7 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_menu_router),
                 CallbackQueryHandler(admin_callback_status, pattern=r"^a:\d+:[PRDC]$"),
                 CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
+                CallbackQueryHandler(admin_sell_status_callback, pattern=r"^sa:\d+:[A-Z_]+$"),
                 CallbackQueryHandler(ticket_start_callback, pattern=r"^ticket:\d+$"),
             ],
             A_CONF_ORDER: [
@@ -4959,6 +4960,9 @@ def main() -> None:
                 CommandHandler("exit_dialog", admin_exit_dialog),
                 CallbackQueryHandler(ticket_start_callback, pattern=r"^ticket:\d+$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reply_to_user),
+            ],
+            A_SELL_QR_TIME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sell_qr_time_input),
             ],
         },
         fallbacks=[
