@@ -1,4 +1,3 @@
-# bot.py
 import logging
 import os
 import re
@@ -2456,6 +2455,139 @@ async def sell_sent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return SELL_CHECKING_WAIT
 
+async def sell_checking_actions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not query.data:
+        return SELL_CHECKING_WAIT
+    await query.answer()
+
+    if query.data == "sell_menu":
+        return await show_menu(update, context)
+
+    if query.data == "sell_my_orders":
+        uid = update.effective_user.id if update.effective_user else 0
+        rows = get_user_orders(uid, limit=10)
+        text = (
+            "Здесь все ваши обмены:\n" + "\n".join(format_order_line_short(r) for r in rows)
+            if rows
+            else "Пока нет заявок."
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            reply_markup=main_menu_keyboard(uid),
+        )
+        return CHOOSING
+
+    if query.data.startswith("sell_txhash:"):
+        order_id = int(query.data.split(":", 1)[1])
+        context.user_data["sell_txhash_order_id"] = order_id
+        await query.edit_message_text(
+            f"Отправьте хеш транзакции (TX Hash) по заявке <b>#{order_id}</b> одним сообщением:",
+            parse_mode="HTML",
+        )
+        return SELL_TXHASH_INPUT
+
+    return SELL_CHECKING_WAIT
+
+
+async def sell_txhash_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.message.text:
+        return SELL_TXHASH_INPUT
+
+    tx_hash = update.message.text.strip()
+    if len(tx_hash) < 16 or " " in tx_hash:
+        await update.message.reply_text(
+            "Некорректный формат TX Hash. Вставьте хеш транзакции без пробелов:"
+        )
+        return SELL_TXHASH_INPUT
+
+    order_id = context.user_data.pop("sell_txhash_order_id", None)
+    if not order_id:
+        await update.message.reply_text("Заявка не найдена. Вернитесь в меню.")
+        return CHOOSING
+
+    update_order_tx_hash(order_id, tx_hash)
+
+    for aid in _all_admin_ids():
+        try:
+            await context.bot.send_message(
+                chat_id=aid,
+                text=f"🔗 По заявке на продажу #{order_id} клиент прислал TX Hash:\n<code>{tx_hash}</code>",
+                parse_mode="HTML",
+            )
+        except TelegramError:
+            pass
+
+    await update.message.reply_text(
+        f"TX Hash по заявке <b>#{order_id}</b> принят и передан на проверку.\n"
+        f"Мы уведомим вас сразу после подтверждения поступления.",
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(update.effective_user.id),
+    )
+    return CHOOSING
+
+
+async def sell_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.effective_user:
+        return CHOOSING
+
+    if update.message.text == BUTTON_BACK_TO_MENU:
+        context.user_data.pop("sell_last_state", None)
+        return await show_menu(update, context, preface="Продажа приостановлена.\n")
+
+    last_state = context.user_data.get("sell_last_state")
+    draft = context.user_data.get("sell_draft", {})
+
+    if last_state is None:
+        return await show_menu(update, context)
+
+    if last_state == SELL_CURRENCY:
+        return await sell_start(update, context)
+
+    if last_state == SELL_NETWORK:
+        crypto = draft.get("currency")
+        networks = CRYPTO_NETWORKS.get(crypto, [])
+        if len(networks) <= 1:
+            return await sell_start(update, context)
+        keyboard = [[InlineKeyboardButton(net, callback_data=f"sell_net:{net}")] for net in networks]
+        keyboard.append([InlineKeyboardButton("В меню", callback_data="sell_menu")])
+        await update.message.reply_text(
+            f"Вы выбрали: <b>{crypto}</b>.\nВыберите сеть отправки:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["sell_last_state"] = SELL_CURRENCY
+        return SELL_NETWORK
+
+    if last_state == SELL_PAYMENT:
+        context.user_data["sell_last_state"] = SELL_NETWORK
+        return await sell_show_payment_methods(update, context)
+
+    if last_state == SELL_AMOUNT_MODE:
+        return await sell_show_amount_mode(update, context)
+
+    if last_state == SELL_AMOUNT_INPUT:
+        prompt = (
+            f"Введите сумму {draft.get('currency')}, которую хотите продать:"
+            if draft.get("amount_mode") == "crypto"
+            else "Введите желаемую сумму выплаты в рублях (RUB):"
+        )
+        await update.message.reply_text(prompt)
+        context.user_data["sell_last_state"] = SELL_AMOUNT_MODE
+        return SELL_AMOUNT_INPUT
+
+    if last_state == SELL_RATE_CONFIRM:
+        context.user_data["sell_last_state"] = SELL_AMOUNT_INPUT
+        return await sell_show_rate_confirm(update, context)
+
+    if last_state == SELL_CARD_INPUT:
+        await update.message.reply_text("Укажите реквизиты карты для выплаты:")
+        context.user_data["sell_last_state"] = SELL_RATE_CONFIRM
+        return SELL_CARD_INPUT
+
+    return await show_menu(update, context)
+
 async def reply_blocked(update: Update) -> None:
     if update.message:
         await update.message.reply_text(
@@ -4695,24 +4827,60 @@ def main() -> None:
                 MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), buy_back),
             ],
             SELL_CURRENCY: [
-                CallbackQueryHandler(sell_currency_selected, pattern=r"^sell_cur:"),
-                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), show_menu),
+                CallbackQueryHandler(sell_currency_selected, pattern=r"^sell_cur:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
             ],
             SELL_NETWORK: [
-                CallbackQueryHandler(sell_network_selected, pattern=r"^sell_net:"),
-                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), show_menu),
+                CallbackQueryHandler(sell_network_selected, pattern=r"^sell_net:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
             ],
             SELL_PAYMENT: [
-                # Сюда подключается следующий шаг (sell_payment_selected)
-                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), show_menu),
-            ],            
+                CallbackQueryHandler(sell_payment_selected, pattern=r"^sell_pay:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_AMOUNT_MODE: [
+                CallbackQueryHandler(sell_amount_mode_selected, pattern=r"^sell_mode:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_AMOUNT_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_amount_input),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_RATE_CONFIRM: [
+                CallbackQueryHandler(sell_rate_confirm, pattern=r"^sell_rate:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_CARD_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_card_input),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_CARD_CONFIRM: [
+                CallbackQueryHandler(sell_card_confirm, pattern=r"^sell_card:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_FINAL_CONFIRM: [
+                CallbackQueryHandler(sell_final_create, pattern=r"^sell_final:|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_DEPOSIT_WAIT: [
+                CallbackQueryHandler(sell_sent_callback, pattern=r"^sell_sent:\d+$|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_CHECKING_WAIT: [
+                CallbackQueryHandler(sell_checking_actions_callback, pattern=r"^sell_txhash:\d+$|^sell_my_orders$|^sell_menu$"),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
+            SELL_TXHASH_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_txhash_input),
+                MessageHandler(filters.Regex(f"^({BUTTON_BACK}|{BUTTON_BACK_TO_MENU})$"), sell_back),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
             CommandHandler("start", start),
             CommandHandler("exchange", exchange_command),
             CommandHandler("close_ticket", close_ticket_user_cmd),
-            CallbackQueryHandler(lambda u, c: show_menu(u, c), pattern=r"^buy_menu$")
+            CallbackQueryHandler(lambda u, c: show_menu(u, c), pattern=r"^buy_menu$|^sell_menu$")
         ],
         allow_reentry=True,
         per_user=True,
