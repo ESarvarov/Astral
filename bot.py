@@ -2211,6 +2211,250 @@ async def sell_rate_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     return SELL_RATE_CONFIRM
 
+async def sell_card_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.message.text:
+        return SELL_CARD_INPUT
+
+    card_details = update.message.text.strip()
+    digits = re.sub(r"\D", "", card_details)
+    if len(digits) < 10 or len(card_details) > 120:
+        await update.message.reply_text(
+            "Формат реквизитов не распознан. Укажите корректный номер карты (16 цифр) или телефон СБП и банк:"
+        )
+        return SELL_CARD_INPUT
+
+    context.user_data.setdefault("sell_draft", {})["card_details"] = card_details
+    context.user_data["sell_last_state"] = SELL_CARD_INPUT
+
+    # --- ЭКРАН 7: Подтверждение реквизитов ---
+    keyboard = [
+        [InlineKeyboardButton("Подтвердить реквизиты", callback_data="sell_card:confirm")],
+        [InlineKeyboardButton("Изменить реквизиты", callback_data="sell_card:change")],
+        [InlineKeyboardButton("В меню", callback_data="sell_menu")],
+    ]
+    await update.message.reply_text(
+        f"Проверьте реквизиты для выплаты:\n"
+        f"<code>{card_details}</code>\n\n"
+        f"Подтвердите, что данные указаны верно.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return SELL_CARD_CONFIRM
+
+
+# --- ЭКРАН 7: Подтверждение реквизитов ---
+async def sell_card_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not query.data:
+        return SELL_CARD_CONFIRM
+    await query.answer()
+
+    if query.data == "sell_menu":
+        context.user_data.pop("sell_draft", None)
+        return await show_menu(update, context)
+
+    action = query.data.split(":", 1)[1]
+    if action == "change":
+        await query.edit_message_text(
+            "Укажите реквизиты карты, на которую хотите получить выплату:"
+        )
+        return SELL_CARD_INPUT
+
+    if action == "confirm":
+        context.user_data["sell_last_state"] = SELL_CARD_CONFIRM
+        return await sell_show_final_confirm(update, context, query)
+
+    return SELL_CARD_CONFIRM
+
+
+# --- ЭКРАН 8: Итоговая проверка и создание заявки ---
+async def sell_show_final_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, query=None
+) -> int:
+    draft = context.user_data.get("sell_draft", {})
+    crypto = draft["currency"]
+    is_card = draft.get("payment_code") == "card"
+
+    keyboard = [
+        [InlineKeyboardButton("Подтвердить условия и создать заявку", callback_data="sell_final:create")],
+        [InlineKeyboardButton("Изменить сумму", callback_data="sell_final:change_amt")],
+        [InlineKeyboardButton("Изменить способ получения", callback_data="sell_final:change_pay")],
+    ]
+    if is_card:
+        keyboard.append(
+            [InlineKeyboardButton("Изменить реквизиты карты", callback_data="sell_final:change_card")]
+        )
+    keyboard.append([InlineKeyboardButton("В меню", callback_data="sell_menu")])
+
+    card_line = (
+        f"Реквизиты карты: <code>{draft.get('card_details')}</code>\n"
+        if is_card
+        else ""
+    )
+
+    text = (
+        f"Проверьте данные перед созданием заявки:\n\n"
+        f"Отправляете: <b>{draft['crypto_amount']:.6f} {crypto}</b>. Сеть: <b>{draft['network']}</b>.\n"
+        f"Получение: <b>{draft['payment_method']}</b>.\n"
+        f"Курс и комиссии: <b>1 {crypto} = {draft['rate']:.2f} RUB</b> (комиссия {draft['commission']:g}%).\n"
+        f"К выплате: <b>{draft['payout_amount']:.2f} RUB</b>.\n"
+        f"{card_line}\n"
+        f"Подтвердите условия и создание заявки."
+    )
+    if query:
+        await query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    elif update.message:
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    return SELL_FINAL_CONFIRM
+
+
+async def sell_final_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not query.data:
+        return SELL_FINAL_CONFIRM
+    await query.answer()
+
+    if query.data == "sell_menu":
+        context.user_data.pop("sell_draft", None)
+        return await show_menu(update, context)
+
+    action = query.data.split(":", 1)[1]
+    if action == "change_amt":
+        return await sell_show_amount_mode(update, context, query)
+    if action == "change_pay":
+        return await sell_show_payment_methods(update, context, query)
+    if action == "change_card":
+        await query.edit_message_text("Укажите новые реквизиты карты для выплаты:")
+        return SELL_CARD_INPUT
+
+    if action != "create":
+        return SELL_FINAL_CONFIRM
+
+    draft = context.user_data.get("sell_draft")
+    if not draft or not update.effective_user:
+        await query.edit_message_text("Сессия истекла. Начните продажу заново.")
+        return CHOOSING
+
+    network = draft["network"]
+    deposit_info = ASTRAL_DEPOSIT_ADDRESSES.get(network)
+    if not deposit_info or not deposit_info[0]:
+        await query.edit_message_text(
+            "Ошибка: адрес приёма для выбранной сети временно не выдан. Заявка не создана."
+        )
+        return SELL_FINAL_CONFIRM
+
+    deposit_address, deposit_memo = deposit_info
+    user_id = update.effective_user.id
+    wallet_field = (
+        draft["card_details"]
+        if draft.get("payment_code") == "card"
+        else "QR-код в банкомате"
+    )
+
+    order_id = save_order(
+        telegram_id=user_id,
+        from_currency=draft["currency"],
+        to_currency="RUB",
+        amount=draft["crypto_amount"],
+        rate=draft["rate"],
+        total=draft["payout_amount"],
+        wallet_address=wallet_field,
+        order_type="sell",
+        network=network,
+        payment_method=draft["payment_method"],
+    )
+    set_order_expiry(order_id, minutes=60)
+
+    # --- ЭКРАН 9: Реквизиты для отправки криптовалюты ---
+    memo_line = f"Тег или Memo: <code>{deposit_memo}</code>\n" if deposit_memo else ""
+    keyboard = [
+        [InlineKeyboardButton("Я отправил криптовалюту", callback_data=f"sell_sent:{order_id}")],
+        [InlineKeyboardButton("В меню", callback_data="sell_menu")],
+    ]
+
+    await query.edit_message_text(
+        f"Заявка <b>#{order_id}</b> создана. Отправьте криптовалюту по указанным реквизитам.\n\n"
+        f"К отправке: <b>{draft['crypto_amount']:.6f} {draft['currency']}</b>. Сеть: <b>{network}</b>.\n"
+        f"Адрес: <code>{deposit_address}</code>\n"
+        f"{memo_line}"
+        f"Срок отправки: <b>60 минут</b> после выдачи адреса.\n"
+        f"Перевод, отправленный в срок, принимается, даже если подтверждение сети завершится позже.\n\n"
+        f"После перевода нажмите «Я отправил криптовалюту».",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    context.user_data.pop("sell_draft", None)
+    context.user_data["sell_active_order_id"] = order_id
+    return SELL_DEPOSIT_WAIT
+
+
+# --- ЭКРАН 10: Проверка поступления криптовалюты и TX Hash ---
+async def sell_sent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query or not query.data:
+        return SELL_DEPOSIT_WAIT
+    await query.answer()
+
+    if query.data == "sell_menu":
+        return await show_menu(update, context)
+
+    order_id = int(query.data.split(":", 1)[1])
+    if is_sell_order_expired(order_id):
+        await query.edit_message_text(
+            f"Срок отправки (60 минут) по заявке <b>#{order_id}</b> истёк. Статус заявки: <b>{STATUS_EXPIRED}</b>.",
+            parse_mode="HTML",
+        )
+        return CHOOSING
+
+    row = get_order_by_id(order_id)
+    if not row:
+        await query.edit_message_text("Заявка не найдена.")
+        return CHOOSING
+
+    # row: (0:id, 1:telegram_id, 2:from_currency, 3:to_currency, 4:amount, 5:rate, 6:total, 7:wallet_address, ...)
+    update_order_status(order_id, STATUS_SELL_CHECKING)
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT network, payment_method FROM orders WHERE id = ?", (order_id,))
+        extra = cur.fetchone() or ("—", "—")
+
+    for aid in _all_admin_ids():
+        try:
+            await context.bot.send_message(
+                chat_id=aid,
+                text=(
+                    f"📥 Клиент нажал «Я отправил криптовалюту» (Продажа #{order_id})\n"
+                    f"User: {row[1]}\n"
+                    f"Отправляет: {row[4]:.6f} {row[2]} (Сеть: {extra[0]})\n"
+                    f"К выплате: {row[6]:.2f} RUB ({extra[1]})\n"
+                    f"Реквизиты: {row[7]}\n"
+                    f"Статус: {STATUS_SELL_CHECKING}"
+                ),
+            )
+        except TelegramError:
+            pass
+
+    keyboard = [
+        [InlineKeyboardButton("Отправить TX Hash", callback_data=f"sell_txhash:{order_id}")],
+        [InlineKeyboardButton("Мои заявки", callback_data="sell_my_orders")],
+        [InlineKeyboardButton("В меню", callback_data="sell_menu")],
+    ]
+
+    await query.edit_message_text(
+        f"Информация об отправке по заявке <b>#{order_id}</b> получена.\n"
+        f"Проверяем поступление <b>{row[4]:.6f} {row[2]}</b> в сети <b>{extra[0]}</b>.\n"
+        f"После подтверждения начнётся выплата выбранным способом.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return SELL_CHECKING_WAIT
+
 async def reply_blocked(update: Update) -> None:
     if update.message:
         await update.message.reply_text(
