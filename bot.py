@@ -1245,13 +1245,6 @@ def get_context_inline_keyboard(
     state = get_user_menu_state(telegram_id)
     buttons = []
 
-    for o in orders:
-    if o[7] in ACTIVE_ORDER_STATUSES:
-        buttons.append(
-            [InlineKeyboardButton(f"{BUTTON_OPEN_ORDER} #{o[0]}", callback_data=f"ctx:open_order:{o[0]}")]
-        )
-        break
-
     if context and context.user_data.get("buy_draft"):
         buttons.append(
             [InlineKeyboardButton("▶️ Продолжить покупку", callback_data="ctx:continue_buy")]
@@ -1270,9 +1263,9 @@ def get_context_inline_keyboard(
     if state["active_orders_count"] == 1:
         orders = get_user_orders(telegram_id, limit=10)
         for o in orders:
-            if o in ACTIVE_ORDER_STATUSES:
+            if o[7] in ACTIVE_ORDER_STATUSES:
                 buttons.append(
-                    [InlineKeyboardButton(f"{BUTTON_OPEN_ORDER} #{o}", callback_data=f"ctx:open_order:{o}")]
+                    [InlineKeyboardButton(f"{BUTTON_OPEN_ORDER} #{o[0]}", callback_data=f"ctx:open_order:{o[0]}")]
                 )
                 break
     elif state["active_orders_count"] > 1:
@@ -3461,20 +3454,6 @@ async def user_in_support_text(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text(
             "Администратор закрыл обращение или недоступен. Нажмите «Чистка» для нового запроса."
-        )
-    return USER_IN_SUPPORT
-
-
-async def user_in_support_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message or not update.effective_user:
-        return USER_IN_SUPPORT
-
-    sent = await notify_admins_user_media(context, update)
-    if sent:
-        await update.message.reply_text("QR-код / файл передан администратору.")
-    else:
-        await update.message.reply_text(
-            "Не удалось передать файл: обращение закрыто или оператор недоступен."
         )
     return USER_IN_SUPPORT
 
