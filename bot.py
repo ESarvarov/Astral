@@ -1187,17 +1187,16 @@ async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message or not update.effective_user:
         return CHOOSING
 
-    # Если нажали "В меню" — сбрасываем черновик и выходим
+    # Нажали "В меню" — НЕ удаляем buy_draft, чтобы в меню появилась кнопка "Продолжить обмен"
     if update.message.text == BUTTON_BACK_TO_MENU:
         context.user_data.pop("buy_last_state", None)
-        return await show_menu(update, context, preface="Покупка отменена.\n")
+        return await show_menu(update, context, preface="Покупка приостановлена. Черновик сохранён.\n")
 
     current_state = context.user_data.get("buy_last_state")
     draft = context.user_data.get("buy_draft", {})
 
-    # Если мы на первом шаге (выбор валюты) или состояние потеряно — возвращаем в меню
+    # Если мы на первом шаге (выбор валюты) — возвращаемся в меню, сохраняя черновик
     if current_state is None or current_state == BUY_CURRENCY:
-        # Исключение: если пришли с оплаты, а сеть была одна — возвращаем на выбор валюты
         if current_state == BUY_CURRENCY and "currency" in draft:
             context.user_data.pop("buy_last_state", None)
             keyboard = [[InlineKeyboardButton(c, callback_data=f"buy_cur:{c}")] for c in ALLOWED_BUY_CRYPTO]
@@ -1207,9 +1206,8 @@ async def buy_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             )
             return BUY_CURRENCY
 
-        context.user_data.pop("buy_draft", None)
         context.user_data.pop("buy_last_state", None)
-        return await show_menu(update, context)
+        return await show_menu(update, context, preface="Возврат в меню. Черновик сохранён.\n")
 
     if current_state == BUY_NETWORK:
         context.user_data.pop("buy_last_state", None)
