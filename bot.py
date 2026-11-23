@@ -248,6 +248,25 @@ _ADMIN_PANEL_REPLY_TEXTS = frozenset(
     )
 )
 
+def get_order_remaining_minutes(order_id: int) -> Optional[int]:
+    """Возвращает остаток минут до истечения заявки на продажу или None."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT order_type, status, expires_at FROM orders WHERE id = ?",
+            (order_id,),
+        )
+        row = cur.fetchone()
+    if not row or row != "sell" or row != STATUS_PENDING or not row:
+        return None
+    try:
+        exp_dt = datetime.fromisoformat(row)
+        delta = exp_dt - datetime.now(timezone.utc)
+        mins = int(delta.total_seconds() // 60)
+        return max(0, mins)
+    except ValueError:
+        return None
+
 
 def _admin_id_set() -> Set[int]:
     raw = (os.getenv("ADMIN_TELEGRAM_IDS") or "").strip()
@@ -1184,57 +1203,74 @@ def format_tickets_broadcast() -> str:
 
 
 def get_user_menu_state(telegram_id: int) -> dict:
+    # Перед подсчётом проверяем, не истекли ли просроченные заявки пользователя
+    expire_overdue_sell_orders()
+
     state = {
         "has_draft": False,
         "active_orders_count": 0,
         "has_completed_orders": False,
         "completed_orders_count": 0,
     }
-    
+
     rows = get_user_orders(telegram_id, limit=50)
     active_count = 0
     completed_count = 0
     for row in rows:
-        status = row[7]
-        if status in (STATUS_PENDING, STATUS_REVIEW):
+        status = row
+        if status in ACTIVE_ORDER_STATUSES:
             active_count += 1
         elif status == STATUS_DONE:
             completed_count += 1
-            
+
     state["active_orders_count"] = active_count
     state["has_completed_orders"] = completed_count > 0
     state["completed_orders_count"] = completed_count
     return state
 
 
-def get_context_inline_keyboard(telegram_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> Optional[InlineKeyboardMarkup]:
+def get_context_inline_keyboard(
+    telegram_id: int, context: ContextTypes.DEFAULT_TYPE = None
+) -> Optional[InlineKeyboardMarkup]:
     state = get_user_menu_state(telegram_id)
     buttons = []
-    
-    # Проверяем наличие черновика
+
     if context and context.user_data.get("buy_draft"):
-        buttons.append([InlineKeyboardButton("▶️ Продолжить обмен", callback_data="ctx:continue_buy")])
-    
-    # ... остальные кнопки ...
-    
+        buttons.append(
+            [InlineKeyboardButton("▶️ Продолжить покупку", callback_data="ctx:continue_buy")]
+        )
+
+    if context and context.user_data.get("sell_draft"):
+        buttons.append(
+            [InlineKeyboardButton("▶️ Продолжить продажу", callback_data="ctx:continue_sell")]
+        )
+
     if state["has_draft"]:
-        buttons.append([InlineKeyboardButton(BUTTON_CONTINUE_DRAFT, callback_data="ctx:continue_draft")])
-        
+        buttons.append(
+            [InlineKeyboardButton(BUTTON_CONTINUE_DRAFT, callback_data="ctx:continue_draft")]
+        )
+
     if state["active_orders_count"] == 1:
         orders = get_user_orders(telegram_id, limit=10)
         for o in orders:
-            if o[7] in (STATUS_PENDING, STATUS_REVIEW):
-                buttons.append([InlineKeyboardButton(f"{BUTTON_OPEN_ORDER} #{o[0]}", callback_data=f"ctx:open_order:{o[0]}")])
+            if o in ACTIVE_ORDER_STATUSES:
+                buttons.append(
+                    [InlineKeyboardButton(f"{BUTTON_OPEN_ORDER} #{o}", callback_data=f"ctx:open_order:{o}")]
+                )
                 break
     elif state["active_orders_count"] > 1:
-        buttons.append([InlineKeyboardButton(BUTTON_ACTIVE_ORDERS, callback_data="ctx:active_orders")])
-        
+        buttons.append(
+            [InlineKeyboardButton(BUTTON_ACTIVE_ORDERS, callback_data="ctx:active_orders")]
+        )
+
     if state["has_completed_orders"]:
         buttons.append([InlineKeyboardButton(BUTTON_REPEAT, callback_data="ctx:repeat")])
-        
+
         if state["completed_orders_count"] > 10:
-            buttons.append([InlineKeyboardButton("🗑 Удалить выполненные заявки", callback_data="ctx:delete_completed")])
-    
+            buttons.append(
+                [InlineKeyboardButton("🗑 Удалить выполненные заявки", callback_data="ctx:delete_completed")]
+            )
+
     if buttons:
         return InlineKeyboardMarkup(buttons)
     return None
@@ -3713,27 +3749,33 @@ async def send_order_status_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: int
 ) -> None:
     del context
+    is_sell_order_expired(order_id)
     row = get_order_by_id(order_id)
     uid = update.effective_user.id if update.effective_user else None
+
     if not row:
         msg = "Заявка не найдена."
-    elif uid is not None and row[1] != uid and not is_admin(uid):
+    elif uid is not None and row != uid and not is_admin(uid):
         msg = "Эта заявка принадлежит другому пользователю."
     else:
         _oid, tg_id, from_c, to_c, amount, rate, total, wallet, status, created_at, updated_at = row
+        rem = get_order_remaining_minutes(_oid)
+        timer_line = f"\n⏳ Осталось времени на отправку: {rem} мин." if rem is not None else ""
         msg = (
             f"Заявка #{_oid}\n"
-            f"Пользователь: {tg_id}\n"
+            f"Статус: {status}{timer_line}\n"
             f"Отдаю: {amount} {from_c}\n"
             f"Получаю: {total:.8f} {to_c}\n"
             f"Курс: {rate:.8f}\n"
-            f"Адрес: {wallet}\n"
-            f"Статус: {status}\n"
+            f"Реквизиты: {wallet}\n"
             f"Создана: {created_at}\n"
             f"Обновлена: {updated_at or '—'}"
         )
+
     if update.message:
         await update.message.reply_text(msg)
+    elif update.callback_query and update.effective_chat:
+        await update.callback_query.edit_message_text(msg)
 
 
 async def handle_order_status_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4201,12 +4243,61 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text("▶️ Функция «Продолжить обмен» находится в разработке.")
         return None
 
+    if data == "ctx:continue_sell":
+        draft = context.user_data.get("sell_draft")
+        if not draft:
+            await query.edit_message_text("Черновик продажи не найден. Начните заново из меню.")
+            return CHOOSING
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="▶️ Продолжаем оформление продажи...",
+            reply_markup=buy_navigation_keyboard(),
+        )
+
+        if "currency" not in draft:
+            keyboard = [[InlineKeyboardButton(c, callback_data=f"sell_cur:{c}")] for c in ALLOWED_SELL_CRYPTO]
+            keyboard.append([InlineKeyboardButton("В меню", callback_data="sell_menu")])
+            await query.edit_message_text(
+                "Какую криптовалюту хотите продать? Выберите вариант из списка.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return SELL_CURRENCY
+
+        if "network" not in draft:
+            networks = CRYPTO_NETWORKS.get(draft["currency"], [])
+            keyboard = [[InlineKeyboardButton(net, callback_data=f"sell_net:{net}")] for net in networks]
+            keyboard.append([InlineKeyboardButton("В меню", callback_data="sell_menu")])
+            await query.edit_message_text(
+                f"Вы выбрали: <b>{draft['currency']}</b>.\nВыберите сеть отправки:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return SELL_NETWORK
+
+        if "payment_code" not in draft:
+            return await sell_show_payment_methods(update, context, query)
+
+        if "crypto_amount" not in draft:
+            return await sell_show_amount_mode(update, context, query)
+
+        if draft.get("payment_code") == "card" and "card_details" not in draft:
+            return await sell_show_rate_confirm(update, context, query)
+
+        return await sell_show_final_confirm(update, context, query)
+    
     if data == "ctx:active_orders":
-        rows = get_user_orders(uid, limit=10)
+        expire_overdue_sell_orders()
+        rows = get_user_orders(uid, limit=20)
         lines = ["🗂 Ваши активные заявки:"]
         for r in rows:
-            if r[7] in (STATUS_PENDING, STATUS_REVIEW):
-                lines.append(f"\n#{r[0]} | {r[7]}\n{r[3]} {r[1]} → {r[5]:.2f} {r[2]}")
+            if r in ACTIVE_ORDER_STATUSES:
+                rem = get_order_remaining_minutes(r)
+                timer_str = f" (осталось ~{rem} мин.)" if rem is not None else ""
+                lines.append(
+                    f"\n#{r} | {r}{timer_str}\n"
+                    f"{r} {r} → {r:.6f} {r}"
+                )
         if len(lines) == 1:
             lines.append("Нет активных заявок.")
         await query.edit_message_text("\n".join(lines))
