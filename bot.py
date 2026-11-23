@@ -3002,6 +3002,50 @@ async def notify_admins_user_message(
         logging.warning("Не удалось доставить админу %s: %s", admin_id, exc)
         return False
 
+async def notify_admins_user_media(
+    context: ContextTypes.DEFAULT_TYPE, update: Update
+) -> bool:
+    user = update.effective_user
+    msg = update.message
+    if not user or not msg:
+        return False
+
+    ticket = get_ticket(user.id)
+    if not ticket:
+        return False
+
+    admin_id = ticket[1]
+    name = (getattr(user, "full_name", None) or "").strip() or "—"
+    username = f"@{user.username}" if getattr(user, "username", None) else "—"
+    caption_extra = f"\nКомментарий: {msg.caption}" if msg.caption else ""
+    header = (
+        f"📲 Медиафайл (QR-код / скриншот) от пользователя\n"
+        f"Имя: {name} ({username})\n"
+        f"ID: {user.id}{caption_extra}"
+    )
+
+    try:
+        if msg.photo:
+            await context.bot.send_photo(
+                chat_id=admin_id,
+                photo=msg.photo[-1].file_id,
+                caption=header,
+                reply_markup=exit_dialog_keyboard(),
+            )
+            save_chat_message(user.id, "user", f"[Фото QR-кода] {msg.caption or ''}".strip())
+            return True
+        if msg.document:
+            await context.bot.send_document(
+                chat_id=admin_id,
+                document=msg.document.file_id,
+                caption=header,
+                reply_markup=exit_dialog_keyboard(),
+            )
+            save_chat_message(user.id, "user", f"[Документ QR-кода] {msg.caption or ''}".strip())
+            return True
+    except TelegramError as exc:
+        logging.warning("Не удалось переслать медиафайл админу %s: %s", admin_id, exc)
+    return False
 
 # --- Пользовательские хендлеры ---
 
@@ -3373,6 +3417,16 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("Выберите действие из меню ниже или используйте команду.")
     return CHOOSING
 
+async def handle_user_media_in_choosing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.effective_user:
+        return CHOOSING
+    if get_ticket(update.effective_user.id):
+        sent = await notify_admins_user_media(context, update)
+        if sent:
+            await update.message.reply_text("QR-код / файл передан администратору.")
+            return USER_IN_SUPPORT
+    await update.message.reply_text("Выберите действие из меню ниже.")
+    return CHOOSING
 
 async def user_in_support_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message or not update.message.text or not update.effective_user:
@@ -3394,6 +3448,20 @@ async def user_in_support_text(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await update.message.reply_text(
             "Администратор закрыл обращение или недоступен. Нажмите «Чистка» для нового запроса."
+        )
+    return USER_IN_SUPPORT
+
+
+async def user_in_support_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not update.effective_user:
+        return USER_IN_SUPPORT
+
+    sent = await notify_admins_user_media(context, update)
+    if sent:
+        await update.message.reply_text("QR-код / файл передан администратору.")
+    else:
+        await update.message.reply_text(
+            "Не удалось передать файл: обращение закрыто или оператор недоступен."
         )
     return USER_IN_SUPPORT
 
@@ -5175,6 +5243,7 @@ def main() -> None:
                 CallbackQueryHandler(cabinet_callback, pattern=r"^cab:"),
                 CallbackQueryHandler(context_callback, pattern=r"^ctx:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons),
+                MessageHandler(filters.PHOTO | filters.Document.ALL, handle_user_media_in_choosing),
             ],
             BLOCKED_USER: [
                 CommandHandler("start", start),
@@ -5198,6 +5267,7 @@ def main() -> None:
             USER_IN_SUPPORT: [
                 CommandHandler("close_ticket", close_ticket_user_cmd),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, user_in_support_text),
+                MessageHandler(filters.PHOTO | filters.Document.ALL, user_in_support_media),
             ],
             BUY_CURRENCY: [
                 CallbackQueryHandler(buy_currency_selected, pattern=r"^buy_cur:"),
