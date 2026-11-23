@@ -1975,9 +1975,10 @@ async def show_menu(
     menu_text = f"{preface}👇 Выберите действие:"
     inline_kb = get_context_inline_keyboard(uid, context)
 
-    # Если вызов пришёл с inline-кнопки (callback_query), убираем старую inline-клавиатуру
+    # Если вызов пришёл с inline-кнопки (callback_query), закрываем "часики" и убираем старую клавиатуру
     if update.callback_query:
         try:
+            await update.callback_query.answer()
             await update.callback_query.edit_message_reply_markup(reply_markup=None)
         except TelegramError:
             pass
@@ -3163,6 +3164,19 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await send_order_status_message(update, context, oid)
         return None
 
+    if data == "ctx:active_orders":
+        rows = get_user_orders(uid, limit=10)
+        lines = ["🗂 Ваши активные заявки:"]
+        for r in rows:
+            if r[7] in (STATUS_PENDING, STATUS_REVIEW):
+                lines.append(f"\n#{r[0]} | {r[7]}\n{r[3]} {r[1]} → {r[5]:.2f} {r[2]}")
+        if len(lines) == 1:
+            lines.append("Нет активных заявок.")
+        await query.edit_message_text("\n".join(lines))
+        return None
+
+    # ...
+
     if data == "ctx:repeat":
         rows = get_user_orders(uid, limit=50)
         done_orders = [r for r in rows if r[7] == STATUS_DONE]
@@ -4044,12 +4058,7 @@ def main() -> None:
         group=1,
     )
 
-    # --- Inline-кнопки контекстного меню (вне ConversationHandler) ---
-    application.add_handler(
-        CallbackQueryHandler(context_callback, pattern=r"^ctx:"),
-        group=1,
-    )
-
+        
     application.add_handler(
         CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
         group=1,
