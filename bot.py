@@ -660,6 +660,43 @@ def is_sell_order_expired(order_id: int) -> bool:
         pass
     return False
 
+def expire_overdue_sell_orders() -> List[Tuple[int, int]]:
+    """Находит заявки на продажу с истёкшим сроком (60 мин), меняет статус на 'Истекла'
+    и возвращает список (order_id, telegram_id) для уведомления клиентов."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    expired_list: List[Tuple[int, int]] = []
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, telegram_id, expires_at
+            FROM orders
+            WHERE order_type = 'sell'
+              AND status = ?
+              AND expires_at IS NOT NULL
+            """,
+            (STATUS_PENDING,),
+        )
+        rows = cur.fetchall()
+
+        for oid, tg_id, exp_str in rows:
+            try:
+                exp_dt = datetime.fromisoformat(exp_str)
+                if now_dt > exp_dt:
+                    cur.execute(
+                        "UPDATE orders SET status = ?, updated_at = ? WHERE id = ?",
+                        (STATUS_EXPIRED, now_iso, oid),
+                    )
+                    expired_list.append((int(oid), int(tg_id)))
+            except ValueError:
+                continue
+
+        if expired_list:
+            conn.commit()
+
+    return expired_list
 
 def mask_card_details(raw: str) -> str:
     digits = re.sub(r"\D", "", raw)
@@ -4914,6 +4951,25 @@ async def admin_callback_status(
     )
     return ConversationHandler.END
 
+async def check_expired_sell_orders_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фоновая задача: каждые 60 секунд переводит просроченные заявки на продажу в статус 'Истекла'."""
+    expired_orders = await run_db(expire_overdue_sell_orders)
+    for oid, tg_id in expired_orders:
+        logging.info("Заявка на продажу #%s истекла (60 мин) -> %s", oid, STATUS_EXPIRED)
+        try:
+            await context.bot.send_message(
+                chat_id=tg_id,
+                text=(
+                    f"⏳ Срок отправки криптовалюты (60 минут) по заявке <b>#{oid}</b> истёк.\n"
+                    f"Статус заявки изменён на: <b>{STATUS_EXPIRED}</b>.\n\n"
+                    f"Заявка перенесена в историю операций. Если вы ещё не отправляли средства, "
+                    f"создайте новую заявку в меню «Продать»."
+                ),
+                parse_mode="HTML",
+            )
+        except TelegramError as exc:
+            logging.warning("Не удалось уведомить пользователя %s об истечении #%s: %s", tg_id, oid, exc)
+
 
 def main() -> None:
     load_dotenv(override=True)
@@ -4933,6 +4989,12 @@ def main() -> None:
     logger.info("TTL кэша курсов: %.0f с", RATES_TTL)
 
     application = ApplicationBuilder().token(token).build()
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            check_expired_sell_orders_job,
+            interval=60,
+            first=15,
+        )
 
     # --- Админ-диалог ---
     admin_conv = ConversationHandler(
