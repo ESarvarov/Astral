@@ -3164,17 +3164,6 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await send_order_status_message(update, context, oid)
         return None
 
-    if data == "ctx:active_orders":
-        rows = get_user_orders(uid, limit=10)
-        lines = ["🗂 Ваши активные заявки:"]
-        for r in rows:
-            if r[7] in (STATUS_PENDING, STATUS_REVIEW):
-                lines.append(f"\n#{r[0]} | {r[7]}\n{r[3]} {r[1]} → {r[5]:.2f} {r[2]}")
-        if len(lines) == 1:
-            lines.append("Нет активных заявок.")
-        await query.edit_message_text("\n".join(lines))
-        return None
-
     # ...
 
     if data == "ctx:repeat":
