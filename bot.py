@@ -2637,6 +2637,7 @@ async def sell_sent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         cur.execute("SELECT network, payment_method FROM orders WHERE id = ?", (order_id,))
         extra = cur.fetchone() or ("—", "—")
 
+    is_qr = (extra[1] == SELL_METHOD_QR)
     for aid in _all_admin_ids():
         try:
             await context.bot.send_message(
@@ -2649,6 +2650,7 @@ async def sell_sent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"Реквизиты: {row[7]}\n"
                     f"Статус: {STATUS_SELL_CHECKING}"
                 ),
+                reply_markup=status_keyboard_sell(order_id, is_qr=is_qr),
             )
         except TelegramError:
             pass
@@ -5140,6 +5142,11 @@ def main() -> None:
         
     application.add_handler(
         CallbackQueryHandler(admin_purchase_status_callback, pattern=r"^pa:\d+:[A-Z]+$"),
+        group=1,
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(admin_sell_status_callback, pattern=r"^sa:\d+:[A-Z_]+$"),
         group=1,
     )
 
