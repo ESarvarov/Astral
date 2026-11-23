@@ -111,7 +111,8 @@ STATUS_EXPIRED = "Истекла"
     A_BLOCK_ID,
     A_UNBLOCK_ID,
     A_REPLY_TO_USER,
-) = range(50, 59)
+    A_SELL_QR_TIME,
+) = range(50, 60)
 
 DB_PATH = os.getenv("DB_PATH", "exchange_bot.db")
 ROLE_USER = "user"
@@ -316,6 +317,22 @@ def status_keyboard_purchase(order_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
+def status_keyboard_sell(order_id: int, is_qr: bool = False) -> InlineKeyboardMarkup:
+    if is_qr:
+        rows = [
+            [InlineKeyboardButton("✅ Крипта получена (Ждёт админа QR)", callback_data=f"sa:{order_id}:CRYPTO_OK")],
+            [InlineKeyboardButton("📅 Согласовать время QR", callback_data=f"sa:{order_id}:QR_TIME")],
+            [InlineKeyboardButton("📲 Запросить QR у клиента", callback_data=f"sa:{order_id}:QR_ASK")],
+            [InlineKeyboardButton("💵 Наличные выданы (Выполнена)", callback_data=f"sa:{order_id}:DONE")],
+            [InlineKeyboardButton("❌ Отменить заявку", callback_data=f"sa:{order_id}:CANCEL")],
+        ]
+    else:
+        rows = [
+            [InlineKeyboardButton("✅ Крипта получена (В выплату)", callback_data=f"sa:{order_id}:CRYPTO_OK")],
+            [InlineKeyboardButton("💸 Выплата выполнена", callback_data=f"sa:{order_id}:DONE")],
+            [InlineKeyboardButton("❌ Отменить заявку", callback_data=f"sa:{order_id}:CANCEL")],
+        ]
+    return InlineKeyboardMarkup(rows)
 
 def exchange_step_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура для шагов обмена: только Назад и Отмена."""
@@ -1067,6 +1084,22 @@ def list_purchase_orders(limit: int = 20) -> List[Tuple]:
         )
         return cur.fetchall()
 
+def list_sell_orders(limit: int = 20) -> List[Tuple]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, telegram_id, from_currency, to_currency, amount, total,
+                   network, payment_method, wallet_address, status, tx_hash
+            FROM orders
+            WHERE order_type = 'sell'
+              AND status NOT IN (?, ?, ?)
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (STATUS_DONE, STATUS_CANCELLED, STATUS_EXPIRED, limit),
+        )
+        return cur.fetchall()
 
 def list_recent_orders_all(limit: int = 20) -> List[Tuple]:
     with get_conn() as conn:
@@ -1228,7 +1261,8 @@ def admin_menu_keyboard() -> ReplyKeyboardMarkup:
             [BUTTON_A_RATES, BUTTON_A_RESERVES],
             [BUTTON_A_BLOCK, BUTTON_A_UNBLOCK],
             [BUTTON_A_TICKETS, BUTTON_A_REFRESH_RATES],
-            ["🛒 Заявки на покупку", BUTTON_A_EXIT], # <--- НОВАЯ КНОПКА
+            ["🛒 Заявки на покупку", "💸 Заявки на продажу"],
+            [BUTTON_A_EXIT],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
@@ -4166,6 +4200,30 @@ async def admin_menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             # Отправляем сообщение со статусом и кнопками изменения статуса
             await update.message.reply_text(text_msg, reply_markup=status_keyboard_purchase(oid))
+        return A_MENU
+    if text == "💸 Заявки на продажу":
+        rows = list_sell_orders()
+        if not rows:
+            await update.message.reply_text("Активных заявок на продажу нет.")
+            return A_MENU
+        for r in rows:
+            oid, tg_id, from_c, to_c, amount, total, network, method, wallet, status, tx_hash = r
+            is_qr = (method == SELL_METHOD_QR)
+            tx_line = f"TX Hash: <code>{tx_hash}</code>\n" if tx_hash else "TX Hash: не указан\n"
+            text_msg = (
+                f"💸 <b>Продажа #{oid}</b> | {status}\n"
+                f"User: <code>{tg_id}</code>\n"
+                f"Отправляет: <b>{amount:.6f} {from_c}</b> ({network or '—'})\n"
+                f"К выплате: <b>{total:.2f} {to_c}</b>\n"
+                f"Способ: {method or '—'}\n"
+                f"Реквизиты: <code>{wallet}</code>\n"
+                f"{tx_line}"
+            )
+            await update.message.reply_text(
+                text_msg,
+                parse_mode="HTML",
+                reply_markup=status_keyboard_sell(oid, is_qr=is_qr),
+            )
         return A_MENU
     if text == BUTTON_A_TICKETS:
         await update.message.reply_text(format_tickets_broadcast())
