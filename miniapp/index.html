@@ -552,6 +552,14 @@
             const from = currentFromCurrency;
             const to = currentToCurrency;
 
+            if (from !== 'RUB' && to !== 'RUB') {
+                receiveInput.value = '';
+                rateText.innerText = 'Сейчас нет доступных криптовалют для Swap';
+                submitBtn.disabled = true;
+                return;
+            }
+            submitBtn.disabled = submitBtn.innerText === 'Отправка...';
+
             if (currentRates[from] && currentRates[to] && amount > 0) {
                 const rate = currentRates[from] / currentRates[to];
                 receiveInput.value = (amount * rate).toFixed(6);
@@ -565,6 +573,7 @@
         amountInput.addEventListener('input', calculate);
 
         submitBtn.addEventListener('click', async () => {
+            if (currentFromCurrency !== 'RUB' && currentToCurrency !== 'RUB') return;
             const amount = parseFloat(amountInput.value);
             const wallet = document.getElementById('wallet-address').value.trim();
 
@@ -599,8 +608,8 @@
             } catch (error) {
                 tg.showAlert(error.message);
             } finally {
-                submitBtn.disabled = false;
                 submitBtn.innerText = 'Совершить обмен';
+                calculate();
             }
         });
 
@@ -609,8 +618,11 @@
             const emptyState = document.getElementById('empty-orders');
             
             try {
-                const response = await fetch(`/api/my_orders?telegram_id=${userId}`);
+                const response = await fetch('/api/my_orders', {
+                    headers: { 'X-Telegram-Init-Data': tg.initData || '' }
+                });
                 const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Не удалось загрузить заявки.');
                 
                 ordersList.innerHTML = ''; 
 
@@ -645,7 +657,8 @@
                     emptyState.style.display = 'flex';
                 }
             } catch (error) {
-                console.error("Ошибка загрузки заявок:", error);
+                ordersList.textContent = error.message;
+                emptyState.style.display = 'none';
             }
         }
 

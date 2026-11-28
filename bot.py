@@ -9,6 +9,7 @@ from functools import partial
 from datetime import datetime, timezone
 from datetime import timedelta
 from typing import Dict, List, Optional, Set, Tuple
+from uuid import uuid4
 
 import requests
 from dotenv import load_dotenv
@@ -100,6 +101,8 @@ STATUS_EXPIRED = "Истекла"
     SELL_TXHASH_INPUT,
 ) = range(31)
 
+SWAP_ROUTE_SELECTION = 31
+
 # Состояния админского диалога
 (
     A_MENU,
@@ -190,7 +193,8 @@ COIN_IDS = {
 # --- Основные кнопки меню (сокращенные) ---
 BUTTON_BUY = "Купить"
 BUTTON_SELL = "Продать"
-BUTTON_SWAP = "Swap"
+BUTTON_SWAP = "Swap криптовалюты"
+LEGACY_BUTTON_SWAP = "Swap"
 BUTTON_AML = "AML проверка"
 BUTTON_WALLET = "Ваш кошелёк"
 BUTTON_CABINET = "Личный кабинет"
@@ -431,6 +435,35 @@ EXCHANGE_MODE_BUY = "buy"
 EXCHANGE_MODE_SELL = "sell"
 EXCHANGE_MODE_SWAP = "swap"
 
+SWAP_NO_ASSETS = "Сейчас нет доступных криптовалют для Swap"
+# Порядок полей маршрута: исходный актив, сеть отправки, целевой актив, сеть получения.
+SWAP_AVAILABLE_ROUTES: Tuple[Tuple[str, str, str, str], ...] = ()
+
+
+def available_swap_routes() -> Tuple[Tuple[str, str, str, str], ...]:
+    """Возвращает только утверждённые и доступные сейчас маршруты."""
+    return SWAP_AVAILABLE_ROUTES
+
+
+def is_crypto_swap(from_currency: str, to_currency: str) -> bool:
+    return from_currency in COIN_IDS and to_currency in COIN_IDS
+
+
+# Часть 4 ТЗ. Отложенные интеграции Swap.
+# Каталог маршрутов: согласовать активы, сети, пары и источник текущей доступности.
+# Сервис расчёта принимает маршрут, сторону ввода и Decimal-сумму. Возвращает
+# неизменяемый расчёт с идентификатором, обеими суммами, курсом, комиссиями и
+# сроком действия. Согласовать лимиты, точность, комиссии, правила фиксации и
+# срок. Проверять расчёт при подтверждении условий и при создании заявки.
+# При изменении показать новый расчёт и сбросить подтверждение условий.
+# Сервис исполнения получает депозитный адрес и Memo для заявки, отслеживает
+# поступление по реквизитам, при необходимости использует TX Hash для поиска.
+# Перед выплатой требуются сетевое подтверждение и сверка суммы, при расхождении
+# нужна ручная проверка. Выплату запускать идемпотентно по ID заявки, статус
+# «Выполнена» выставлять после подтверждения исходящей транзакции.
+# Согласовать провайдера, критерии подтверждения обеих сетей, срок отправки,
+# обработку переводов у границы срока и восстановление после сбоя маршрута
+# или выдачи реквизитов. Допуск к исполнению подключается после согласования.
 
 def _exchange_mode_from_context(context: ContextTypes.DEFAULT_TYPE) -> str:
     m = context.user_data.get("exchange_mode", EXCHANGE_MODE_SWAP)
@@ -3186,6 +3219,96 @@ async def rates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return CHOOSING
 
 
+async def swap_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message or not await ensure_not_blocked(update):
+        return CHOOSING
+    return await show_swap_route_step(update, context, ())
+
+
+async def show_swap_route_step(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    selected: Tuple[str, ...],
+) -> int:
+    step = len(selected)
+    routes = [route for route in available_swap_routes() if route[:step] == selected]
+    if step == 0 and not routes:
+        context.user_data.pop("swap_route_selection", None)
+        return await show_menu(update, context, preface=f"{SWAP_NO_ASSETS}\n")
+
+    if step == 0:
+        text = "Какую криптовалюту хотите отдать? Выберите вариант из списка."
+    elif step == 1:
+        text = f"Вы отдаёте: {selected[0]}.\nВыберите сеть, по которой будет отправлена эта криптовалюта."
+    elif step == 2:
+        text = f"Вы отдаёте: {selected[0]}. Сеть отправки: {selected[1]}.\nКакую криптовалюту хотите получить?"
+    elif step == 3:
+        text = f"Вы получите: {selected[2]}.\nВыберите сеть получения. Убедитесь, что ваш кошелёк поддерживает эту сеть."
+    else:
+        text = (
+            f"Отдаёте: {selected[0]} ({selected[1]}). Получаете: {selected[2]} ({selected[3]}).\n"
+            "Расчёт Swap сейчас недоступен."
+        )
+
+    if not routes:
+        text = (
+            "Доступных сетей получения сейчас нет. Вернитесь к выбору криптовалюты."
+            if step == 3
+            else "По выбранному направлению сейчас нет доступных вариантов. Вернитесь назад, чтобы изменить выбор."
+        )
+
+    options = tuple(dict.fromkeys(route[step] for route in routes)) if step < 4 else ()
+    token = uuid4().hex
+    prefix = f"swap_route:{token}:"
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"{prefix}{index}")]
+        for index, label in enumerate(options)
+    ]
+    navigation = [InlineKeyboardButton("В меню", callback_data=f"{prefix}menu")]
+    if step:
+        navigation.insert(0, InlineKeyboardButton("Назад", callback_data=f"{prefix}back"))
+    rows.append(navigation)
+
+    query = update.callback_query
+    markup = InlineKeyboardMarkup(rows)
+    if query:
+        await query.edit_message_text(text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
+    context.user_data["swap_route_selection"] = (update.effective_chat.id, token, selected, options)
+    return SWAP_ROUTE_SELECTION
+
+
+async def swap_route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    query = update.callback_query
+    _, token, action = query.data.split(":", 2)
+    session = context.user_data.get("swap_route_selection")
+    if not session or session[:2] != (update.effective_chat.id, token):
+        await query.answer("Этот экран устарел. Воспользуйтесь последним меню Swap.")
+        return None
+    if action == "menu" or is_user_blocked(update.effective_user.id):
+        context.user_data.pop("swap_route_selection", None)
+        return await show_menu(update, context)
+
+    selected, options = session[2:]
+    if action == "back":
+        await query.answer()
+        return await show_swap_route_step(update, context, selected[:-1])
+    if not action.isascii() or not action.isdecimal() or len(action) > 8:
+        await query.answer()
+        return None
+    index = int(action)
+    if index >= len(options):
+        await query.answer()
+        return None
+    candidate = selected + (options[index],)
+    if not any(route[:len(candidate)] == candidate for route in available_swap_routes()):
+        await query.answer("Выбранный вариант больше недоступен.", show_alert=True)
+        return await show_swap_route_step(update, context, selected)
+    await query.answer()
+    return await show_swap_route_step(update, context, candidate)
+
+
 async def exchange_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _clear_exchange_draft(context)
     context.user_data["exchange_mode"] = EXCHANGE_MODE_SWAP
@@ -3271,6 +3394,9 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return CHOOSING
     
+    if text in (BUTTON_SWAP, LEGACY_BUTTON_SWAP):
+        return await swap_start(update, context)
+
     if (context.user_data.get("from_currency") and 
         context.user_data.get("to_currency") and 
         "amount" not in context.user_data and
@@ -3285,7 +3411,9 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
             
         from_currency = context.user_data["from_currency"]
         to_currency = context.user_data["to_currency"]
-        
+        if is_crypto_swap(from_currency, to_currency):
+            return await reject_legacy_crypto_swap(update, context)
+
         try:
             rates_ref = get_effective_exchange_rates()
             rate = rates_ref[from_currency] / rates_ref[to_currency]
@@ -3319,11 +3447,6 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if text == BUTTON_SELL:
         return await sell_start(update, context)
-
-    if text == BUTTON_SWAP:
-        _clear_exchange_draft(context)
-        context.user_data["exchange_mode"] = EXCHANGE_MODE_SWAP
-        return await handle_clean_request(update, context)
 
     if text == BUTTON_AML:
         await update.message.reply_text("🛡 Сценарий проверки AML находится в разработке (согласно ТЗ).")
@@ -3521,6 +3644,11 @@ async def handle_exchange_from(update: Update, context: ContextTypes.DEFAULT_TYP
     return TO_CURRENCY
 
 
+async def reject_legacy_crypto_swap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    _clear_exchange_draft(context)
+    return await show_menu(update, context, preface=f"{SWAP_NO_ASSETS}\n")
+
+
 async def handle_exchange_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message or not update.message.text:
         return TO_CURRENCY
@@ -3580,6 +3708,9 @@ async def handle_exchange_to(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return TO_CURRENCY
         context.user_data["to_currency"] = to_currency
 
+    if is_crypto_swap(context.user_data["from_currency"], context.user_data["to_currency"]):
+        return await reject_legacy_crypto_swap(update, context)
+
     context.user_data["exchange_step"] = "amount"
     await update.message.reply_text(
         prompt_exchange_amount(mode, from_currency), reply_markup=exchange_step_keyboard()
@@ -3626,6 +3757,9 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             "Введите корректную положительную сумму (например, 0.5)."
         )
         return AMOUNT
+
+    if is_crypto_swap(context.user_data.get("from_currency"), context.user_data.get("to_currency")):
+        return await reject_legacy_crypto_swap(update, context)
 
     settings = get_settings()
     if amount < settings["min_amount_swap"]:
@@ -3724,6 +3858,8 @@ async def finalize_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     mode = _exchange_mode_from_context(context)
     order_type = mode if mode in ("buy", "sell") else "swap"
+    if is_crypto_swap(from_currency, to_currency):
+        return await reject_legacy_crypto_swap(update, context)
 
     order_id = save_order(
         telegram_id=user_id,
@@ -3837,8 +3973,8 @@ async def send_order_status_message(
 
     if not row:
         msg = "Заявка не найдена."
-    elif uid is not None and row[1] != uid and not is_admin(uid):
-        msg = "Эта заявка принадлежит другому пользователю."
+    elif row[1] != uid and (uid is None or is_crypto_swap(row[2], row[3]) or not is_admin(uid)):
+        msg = "Заявка не найдена." if is_crypto_swap(row[2], row[3]) else "Эта заявка принадлежит другому пользователю."
     else:
         _oid, tg_id, from_c, to_c, amount, rate, total, wallet, status, created_at, updated_at = row
         rem = get_order_remaining_minutes(_oid)
@@ -4171,6 +4307,9 @@ async def currency_select_callback(
                 return TO_CURRENCY
             context.user_data["to_currency"] = ticker
 
+        if is_crypto_swap(context.user_data["from_currency"], context.user_data["to_currency"]):
+            return await reject_legacy_crypto_swap(update, context)
+
         context.user_data["exchange_step"] = "amount"
         await query.edit_message_text(
             prompt_exchange_amount(mode, from_currency),
@@ -4420,6 +4559,11 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return None
 
         _oid, tg_id, from_c, to_c, amount, rate, total, wallet, status, created_at, updated_at = row
+        if tg_id != uid or status != STATUS_DONE:
+            await query.edit_message_text("Заявка не найдена.")
+            return None
+        if is_crypto_swap(from_c, to_c):
+            return await reject_legacy_crypto_swap(update, context)
 
         _clear_exchange_draft(context)
         context.user_data["exchange_mode"] = EXCHANGE_MODE_SWAP
@@ -5241,6 +5385,11 @@ def main() -> None:
                 CommandHandler("start", start),
                 CommandHandler("support", support),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, blocked_user_messages),
+            ],
+            SWAP_ROUTE_SELECTION: [
+                CallbackQueryHandler(swap_route_callback, pattern=r"^swap_route:"),
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_SWAP)}$"), swap_start),
+                MessageHandler(filters.Regex(f"^{re.escape(BUTTON_BACK_TO_MENU)}$"), show_menu),
             ],
             ORDER_STATUS_WAIT: [
                 CommandHandler("status", cmd_status),

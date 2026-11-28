@@ -1,10 +1,14 @@
+import hmac
+import json
 import os
+import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from urllib.parse import parse_qsl
 import requests
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -13,6 +17,8 @@ from telegram.ext import Application
 from bot import (
     ALLOWED,
     STATUS_PENDING,
+    SWAP_NO_ASSETS,
+    is_crypto_swap,
     get_effective_exchange_rates,
     init_db,
     is_user_blocked,
@@ -79,6 +85,9 @@ def create_order(payload: OrderRequest) -> Dict[str, Any]:
     from_currency = payload.from_currency.upper()
     to_currency = payload.to_currency.upper()
 
+    if is_crypto_swap(from_currency, to_currency):
+        raise HTTPException(status_code=503, detail=SWAP_NO_ASSETS)
+
     if from_currency not in ALLOWED or to_currency not in ALLOWED:
         raise HTTPException(status_code=400, detail="Неверная валюта.")
     if from_currency == to_currency:
@@ -108,10 +117,36 @@ def create_order(payload: OrderRequest) -> Dict[str, Any]:
         "status": STATUS_PENDING,
     }
 
+def miniapp_order_owner(init_data: Optional[str]) -> int:
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise HTTPException(status_code=503, detail="Проверка Telegram временно недоступна.")
+    try:
+        fields = parse_qsl(init_data or "", keep_blank_values=True, strict_parsing=True)
+        values = dict(fields)
+        if len(values) != len(fields):
+            raise ValueError("Duplicate initData fields")
+        supplied_hash = values.pop("hash")
+        check_string = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))
+        secret = hmac.digest(b"WebAppData", token.encode(), "sha256")
+        expected_hash = hmac.digest(secret, check_string.encode(), "sha256").hex()
+        if not hmac.compare_digest(expected_hash, supplied_hash):
+            raise ValueError("Invalid initData signature")
+        age_seconds = time.time() - int(values["auth_date"])
+        if not 0 <= age_seconds <= 86400:
+            raise ValueError("Expired initData")
+        user_id = json.loads(values["user"])["id"]
+        if type(user_id) is not int or user_id <= 0:
+            raise ValueError("Invalid Telegram user ID")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Откройте Mini App заново через Telegram.") from exc
+    return user_id
+
+
 @app.get("/api/my_orders")
-def get_my_orders(telegram_id: int):
+def get_my_orders(telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
     from bot import get_user_orders
-    orders = get_user_orders(telegram_id, limit=20)
+    orders = get_user_orders(miniapp_order_owner(telegram_init_data), limit=20)
     result = []
     for row in orders:
         result.append({
